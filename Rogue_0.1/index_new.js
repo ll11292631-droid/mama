@@ -336,7 +336,7 @@ Schema = (() => {
 
   // ─────────────────────────────────────────────────────────────────────────────
   // 晋升消耗（唯一权威口径：**只由前端扣减**）
-  //   - 默认 4 源石/人；难度 3 起为 5 源石/人（见 DifficultyRules）。
+  //   - 默认 4 源石/人；难度 4 起为 5 源石/人（见 DifficultyRules）。
   //   - 严禁任何其它路径（AI/镜像逻辑）重复扣减淫堕源石；战报中必须明示"费用已扣完"。
   // ─────────────────────────────────────────────────────────────────────────────
   const PROMOTE_COST_DEFAULT = 4;
@@ -352,9 +352,10 @@ Schema = (() => {
   const DifficultyRules = {
     1: { 效果: ['初始核心生命 -4'] },
     2: { 效果: ['每层三轴削减：20% → 25%'] },
-    3: { 效果: ['晋升干员消耗：4 源石 → 5 源石 / 人'] },
-    4: { 效果: ['对战时须同时拥有 2 条轴优势，才判定为「优势」'] },
-    5: { 效果: ['「所知」对我方战力的加减反转：所知为正 → 倒扣我方去量化；所知为负 → 增益'] },
+    3: { 效果: ['每过一层：我方战力 −1（仅影响长期池战力，不改干员数值）'] },
+    4: { 效果: ['晋升干员消耗：4 源石 → 5 源石 / 人'] },
+    5: { 效果: ['对战时须同时拥有 2 条轴优势，才判定为「优势」'] },
+    6: { 效果: ['「所知」对我方战力的加减反转：所知为正 → 倒扣我方去量化；所知为负 → 增益'] },
   };
 
   // 分队（横向大字选牌界面）。enabled=false → 显示「敬请期待」，不可点选。
@@ -400,14 +401,15 @@ Schema = (() => {
 
   /** 难度叠加计算上下文（系数类效果；供 _recomputeLongPool / _evalBattle 使用） */
   function diffCtx(level) {
-    const lv = Math.max(0, Math.min(5, Math.trunc(Number(level)) || 0));
+    const lv = Math.max(0, Math.min(6, Math.trunc(Number(level)) || 0));
     return {
       档位: lv,
-      decay: lv >= 2 ? 0.75 : 0.8,          // 每层三轴削减
-      promoteCost: lv >= 3 ? 5 : PROMOTE_COST_DEFAULT,
-      needAxes: lv >= 4 ? 2 : 1,            // 判定「优势」所需优势轴数
-      knownReverse: lv >= 5,                // 「所知」加减反转
-      hpPenalty: lv >= 1 ? 4 : 0,           // 开局核心生命扣减
+      decay: lv >= 2 ? 0.75 : 0.8,              // 每层三轴削减
+      layerPowerPenalty: lv >= 3 ? 1 : 0,       // 每过一层：长期池战力 −1（不改干员数值）
+      promoteCost: lv >= 4 ? 5 : PROMOTE_COST_DEFAULT,
+      needAxes: lv >= 5 ? 2 : 1,                // 判定「优势」所需优势轴数
+      knownReverse: lv >= 6,                    // 「所知」加减反转
+      hpPenalty: lv >= 1 ? 4 : 0,               // 开局核心生命扣减
     };
   }
 
@@ -1965,10 +1967,11 @@ Schema = (() => {
       display: flex; flex-direction: column;
       border-top: 1px solid transparent;
       border-image: linear-gradient(to right, transparent, rgba(155,180,220,0.35), transparent) 1; }
-    /* 〘展开/收起〙：贴住聊天面板顶边居中；未展开朝下、展开后朝上（方向由 JS 写 innerText 决定）。
+    /* 〘展开/收起〙：贴住聊天面板顶边、靠左一大半让出右侧（玩家气泡/正文区）空间；
+       未展开朝下、展开后朝上（方向由 JS 写 innerText 决定）。
        ⚠ 用 position:fixed + z-index:400，作为 #root 直接子级悬浮在最顶层：
        永远盖过 gal 层(200)/聊天面板(50)，任何状态下都点得到（曾经的"<gal>盖住按钮"bug）。 */
-    #chat-expand { position: fixed; top: calc(var(--vh) * 100 - var(--vh) * 28 - 26px); left: 50%; transform: translateX(-50%);
+    #chat-expand { position: fixed; top: calc(var(--vh) * 100 - var(--vh) * 28 - 26px); left: 22%; transform: translateX(-50%);
       width: 68px; height: 26px; padding: 0; margin: 0; cursor: pointer; font-size: max(11px, calc(12px + var(--fs-d, 0px)));
       line-height: 1; color: #cfd8e6; font-family: inherit;
       display: flex; align-items: center; justify-content: center;
@@ -2031,9 +2034,10 @@ Schema = (() => {
       pointer-events: none; }
     /* !important：防止任何来源（如被挪进 flex 容器）把 display 压回 none，导致"看不见窗口" */
     #gal-layer.on { display: block !important; }
-    /* ── 玩家最后一条发言气泡：悬浮在对话框「右上角、框外」──
-       位置 = 原「记录」按钮那块；内容实时取聊天最后一条 user 消息（已剪除系统战报）。 */
-    #gal-float { position: absolute; right: 30px; bottom: calc(100% + 10px); z-index: 3;
+    /* ── 玩家最后一条发言气泡：贴着对话框「上边缘」靠右悬浮，内容变长时向上拉伸 ──
+        bottom:100% → 气泡底边正好贴住 gal 对话框(#gal-box)上沿，不再悬在窗口顶之上；
+        flex 列以底边为锚，内容越多整体越高。内容实时取聊天最后一条 user 消息（已剪除系统战报）。 */
+    #gal-float { position: absolute; right: 30px; bottom: 100%; z-index: 3;
       display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
       max-width: 62%; pointer-events: none; }
     #gal-float .gal-you { display: inline-block; padding: 7px 13px; font-size: max(11px, calc(13px + var(--fs-d, 0px))); line-height: 1.5;
@@ -2738,7 +2742,7 @@ Schema = (() => {
     body.ui-compact #gal-back { left: 9px; }
     body.ui-compact #gal-next { right: 10px; }
     body.ui-compact #gal-pager { bottom: 8px; letter-spacing: 1px; }
-    body.ui-compact #gal-float { right: 10px; bottom: calc(100% + 6px); max-width: 92%; }
+    body.ui-compact #gal-float { right: 10px; bottom: 100%; max-width: 92%; }
     body.ui-compact #gal-float .gal-you { padding: 5px 10px; max-height: 3.4em; }
     /* ⚠ 必须带 #gal-body：基础规则是「#gal-body .gal-grp」（1 个 id），
        用 body.ui-compact .gal-grp 反而权重更低、压不住 30vh 的旧值 */
@@ -2884,7 +2888,7 @@ Schema = (() => {
       // 拉开局选择的面板默认值（难度数字按钮 / 分队选牌）跟随存档，未开始游戏前改动只暂存内存
       try {
         const v0 = readVars(this.win);
-        State.pendingDifficulty = Math.max(0, Math.min(5, Math.trunc(Number((v0['$难度'] || {}).档位)) || 0));
+        State.pendingDifficulty = Math.max(0, Math.min(6, Math.trunc(Number((v0['$难度'] || {}).档位)) || 0));
         State.pendingSquad = (v0['$难度'] || {}).分队 || '后勤分队';
       } catch (e) { State.pendingDifficulty = 1; State.pendingSquad = '后勤分队'; }
       this.switchView(resume);
@@ -3100,10 +3104,11 @@ Schema = (() => {
                ⚠ 必须是 #root 的直接子级、绝不能放进 #chat-container：
                  #chat-container 是 display:flex 的列容器，子元素会被当 flex item 布局，窗口会被压扁。 -->
           <div id="gal-layer">
-            <div id="gal-float">
-              <div id="gal-you" class="gal-you off"></div>
-            </div>
             <div id="gal-box" title="单击：翻下一页">
+              <!-- 玩家最后一条发言气泡：贴在对话框上边缘（见 #gal-float 的 bottom:100%）-->
+              <div id="gal-float">
+                <div id="gal-you" class="gal-you off"></div>
+              </div>
               <div id="gal-name" class="off"></div>
               <img id="gal-avatar" alt="">
               <div id="gal-body"></div>
@@ -3211,7 +3216,7 @@ Schema = (() => {
      */
 
 
-    /** 晋升：仅对「侵蚀」阶段使用，耗 4 源石/人（难度3 起 5）；晋升后状态改为「活化」并记入已晋升，不可再晋升。
+    /** 晋升：仅对「侵蚀」阶段使用，耗 4 源石/人（难度4 起 5）；晋升后状态改为「活化」并记入已晋升，不可再晋升。
      *  扣费只在前端进行（_doPromoteConfirm）；战报会向 AI 明示"已扣费完成"，AI 不得再改 淫堕源石。 */
 
 
@@ -3538,7 +3543,7 @@ Schema = (() => {
         hud.id = 'node-hud';
         hud.style.cssText = 'position:fixed;top:calc(var(--bar-h, 48px) + 4px);left:50%;transform:translateX(-50%);z-index:300;display:flex;align-items:center;gap:10px;background:rgba(10,12,16,.82);border:1px solid rgba(150,170,210,.35);border-radius:22px;padding:5px 14px;font-size: max(11px, calc(13px + var(--fs-d, 0px)));color:#e8e6e0;box-shadow:0 4px 14px rgba(0,0,0,.45);flex-wrap:wrap;justify-content:center';
         hud.innerHTML = `<span style="color:#ffd98c;font-weight:bold">${type}</span>`
-          + (year ? `<span style="color:#9aa3b0;font-size: max(11px, calc(11px + var(--fs-d, 0px)))">时间点 ${year}</span>` : '')
+          + (year && type !== '诡意行商' ? `<span style="color:#9aa3b0;font-size: max(11px, calc(11px + var(--fs-d, 0px)))">时间点 ${year}</span>` : '')
           + (enemy ? `<span style="color:#ffb4a0;font-size: max(11px, calc(12px + var(--fs-d, 0px)))">目标：${enemy}</span>` : '')
           + (ni.$锁定 ? '<span style="color:#ff9f43">已收束·只能离开</span>' : '')
           + `<button class="mini-btn gray" id="node-leave-btn" style="padding:3px 10px${canLeave ? '' : ';opacity:.35;cursor:not-allowed'}"${canLeave ? '' : ' disabled'}>离开节点</button>`;
@@ -3957,7 +3962,6 @@ Schema = (() => {
       // 覆盖全图的高层箭头图层（空，随后用真实节点坐标填充）
       html += '<svg class="map-links" id="map-links"></svg>';
       html += '</div></div>';
-      html += `<div class="map-hint">已解锁：第 1~${unlocked}/${totalCols} 列　通关当前级节点可解锁下一级</div>`;
       container.innerHTML = html;
 
       // 布局完成后读取真实节点位置绘制弧线箭头（任意尺寸/缩放自适应）
@@ -4546,7 +4550,8 @@ Schema = (() => {
         gainOfLayer(L);
         if (L < layer) { cur.未来 *= decay; cur.过往 *= decay; cur.现实 *= decay; }
       }
-      // 去量化：全体干员取最高；多人 +1；并列最高再 +1（防多人膨胀；不被层削减）
+      // 去量化：全体干员取最高；仅当【多人并列最高】时才 +1（不再因多人人数 +1；不被层削减）
+      // 难度3+：每过一层 战力 −1（只改动长期池数值，不改干员信息）——与每层削轴同口径，过层数 = 层数−1
       const opNames = Object.keys(roster);
       let maxQ = 0, ties = 0;
       opNames.forEach((n) => {
@@ -4554,7 +4559,8 @@ Schema = (() => {
         if (q > maxQ) { maxQ = q; ties = 1; }
         else if (q === maxQ && q > 0) ties++;
       });
-      const deq = maxQ + (opNames.length > 1 ? 1 : 0) + (ties > 1 ? 1 : 0);
+      const layPowPenalty = this._diffCtx().layerPowerPenalty || 0;
+      const deq = Math.max(0, maxQ + (ties > 1 ? 1 : 0) - layPowPenalty * Math.max(0, layer - 1));
       const nowNames = Object.keys(cds);
       writeVars(this.win, (d) => {
         const ld = d['$收藏品获得层'] = (d['$收藏品获得层'] && typeof d['$收藏品获得层'] === 'object') ? d['$收藏品获得层'] : {};
@@ -4664,6 +4670,11 @@ Schema = (() => {
         const v = readVars(this.win);
         const ni = v['$切片'] || {};
         if (!ni.$active || State.currentStatus !== 'event_node') return;
+        // 诡意行商：独立于时空的交易节点，购买过程可自由招募多名干员，不参与变奏审计（无原定目标/额外收服限制）
+        try {
+          const ndt = (ni.$nodeData && ni.$nodeData.type) || State.nodeType || '';
+          if (ndt === '诡意行商') return;
+        } catch (e) {}
         if (ni.$锁定 || ni.$变奏用尽) return;
         const roster = v['干员编队'] || {};
         const baseline = Array.isArray(ni.$收服基线) ? ni.$收服基线 : [];
@@ -4714,11 +4725,11 @@ Schema = (() => {
       try {
         const v = readVars(this.win);
         const n = Math.trunc(Number((v['$难度'] || {}).档位));
-        return isFinite(n) ? Math.max(0, Math.min(5, n)) : 1;
+        return isFinite(n) ? Math.max(0, Math.min(6, n)) : 1;
       } catch (e) { return 1; }
     },
 
-    /** 当前晋升单价：默认 4 源石/人；难度 3 起 5 源石/人。前端唯一权威口径。 */
+    /** 当前晋升单价：默认 4 源石/人；难度 4 起 5 源石/人。前端唯一权威口径。 */
     _promoteCost() {
       return diffCtx(this._effDiff()).promoteCost;
     },
@@ -4726,7 +4737,7 @@ Schema = (() => {
     /** 当前生效难度口径的来源：优先"本局界面暂存值"，否则读变量（保证显示与结算一致） */
     _effDiff() {
       const n = Math.trunc(Number(State.pendingDifficulty));
-      if (Number.isFinite(n)) return Math.max(0, Math.min(5, n));
+      if (Number.isFinite(n)) return Math.max(0, Math.min(6, n));
       return this._diffLevel();
     },
 
@@ -4746,9 +4757,10 @@ Schema = (() => {
         { 档: 0, 名: '标准', 简介: '一切不变', 效果: ['无任何额外修正'] },
         { 档: 1, 名: '受挫', 简介: '立足之地更窄', 效果: DifficultyRules[1].效果 },
         { 档: 2, 名: '侵蚀', 简介: '三轴随时间流失得更快', 效果: DifficultyRules[2].效果 },
-        { 档: 3, 名: '昂贵', 简介: '改造她的代价更高', 效果: DifficultyRules[3].效果 },
-        { 档: 4, 名: '压制', 简介: '单轴优势已不够用', 效果: DifficultyRules[4].效果 },
-        { 档: 5, 名: '悖论', 简介: '你所以为的"了解"开始反噬', 效果: DifficultyRules[5].效果 },
+        { 档: 3, 名: '衰竭', 简介: '长路磨蚀：每过一层战力 −1', 效果: DifficultyRules[3].效果 },
+        { 档: 4, 名: '昂贵', 简介: '改造她的代价更高', 效果: DifficultyRules[4].效果 },
+        { 档: 5, 名: '压制', 简介: '单轴优势已不够用', 效果: DifficultyRules[5].效果 },
+        { 档: 6, 名: '悖论', 简介: '你所以为的"了解"开始反噬', 效果: DifficultyRules[6].效果 },
       ];
     },
 
@@ -4790,7 +4802,7 @@ Schema = (() => {
 
       const list = overlay.querySelector('#diff-wheel-list');
       const rowsOf = () => list.querySelectorAll('.dw-item');
-      let idx = Math.max(0, Math.min(total - 1, cur));   // 当前选中（0~5）
+      let idx = Math.max(0, Math.min(total - 1, cur));   // 当前选中（0~6）
 
       /** 每行高度用**像素**固定（百分比高度受自身 padding 影响会循环变化）；首尾留白 = (列表高-行高)/2，
        *  保证首尾行也能滚到正中。配合 position:relative，row.offsetTop 相对本列表，scrollTo 目标精确。 */
@@ -4798,7 +4810,7 @@ Schema = (() => {
         const rows = rowsOf();
         if (!rows.length) return;
         // 行高下限：桌面 96px；紧凑档（手机横屏约 393px 高）降到 66px，
-        // 否则 6 档轮盘一次只能露出 2 档，上下箭头要按很多次。
+        // 否则 7 档轮盘一次只能露出 2 档，上下箭头要按很多次。
         const minH = this.body.classList.contains('ui-compact') ? 66 : 96;
         const itemH = Math.max(minH, Math.floor(list.clientHeight / total));
         rows.forEach((el) => { el.style.height = itemH + 'px'; });
@@ -4834,7 +4846,7 @@ Schema = (() => {
       overlay.querySelector('#dw-down').onclick = () => step(1);
 
       overlay.querySelector('#diff-wheel-ok').onclick = () => {
-        State.pendingDifficulty = Math.max(0, Math.min(5, idx));   // 行索引 == 档位（难度 0 起）
+        State.pendingDifficulty = Math.max(0, Math.min(6, idx));   // 行索引 == 档位（难度 0 起）
         overlay.remove();
         this._renderHome();                                          // 返回初始界面，数字显示已选难度
       };
@@ -5184,7 +5196,7 @@ Schema = (() => {
     /**
      * 晋升确认（**扣费唯一入口：只在前端扣**）
      *   - 只对"未晋升"干员收费：先按实际可晋升名单算钱，再扣，避免为已晋升者白扣（重复扣减 bug 根因之一）。
-     *   - 单价 = 难度口径（默认 4 源石/人；难度3 起 5 源石/人）。
+     *   - 单价 = 难度口径（默认 4 源石/人；难度4 起 5 源石/人）。
      *   - 战报明确声明"费用已由前端扣完"，并要求 AI 不得改动淫堕源石。
      */
     _doPromoteConfirm() {
@@ -5533,24 +5545,24 @@ Schema = (() => {
      * 敌我裁定：逐轴对比我方最终三轴 ≥ 敌方该轴抗性 → 该轴优势；优势达标则敌方量化减半，否则双方原值硬碰硬（我方不减半）；
      * 差>0胜 / <0负 / =0相持掷骰。
      * 难度修正（纯前端叠加，逐级生效）：
-     *   - 难度4：须同时有 ≥2 轴优势才算"优势达标"；
-     *   - 难度5：「所知」对我方战力的加减反转 —— 所知为正 → 倒扣我方去量化；所知为负 → 增益。
+     *   - 难度5：须同时有 ≥2 轴优势才算"优势达标"；
+     *   - 难度6：「所知」对我方战力的加减反转 —— 所知为正 → 倒扣我方去量化；所知为负 → 增益。
      */
     _evalBattle(t, deqBase, known, enemy) {
       const ePoll = (enemy && enemy.污染) || {};
       const lv = this._diffLevel();
       const winAxes = ['未来', '过往', '现实'].filter((ax) => t[ax] >= (Number(ePoll[ax]) || 0));
-      const need = lv >= 4 ? 2 : 1;                 // 难度4：必须双轴优势
+      const need = lv >= 5 ? 2 : 1;                 // 难度5：必须双轴优势
       const advantage = winAxes.length >= need;
       let deq = Number(deqBase) || 0;
       let eq = Number(enemy && enemy.量化) || 0;
       if (advantage) eq = eq / 2;   // 优势达标 → 敌方量化减半
       // 优势未达标：双方原值硬碰硬，我方去量化不减半（按拍板设计，非"失败惩罚"）
       const kn = Number(known) || 0;
-      const knownDelta = lv >= 5 ? -kn : kn;       // 难度5：所知效果反转
+      const knownDelta = lv >= 6 ? -kn : kn;       // 难度6：所知效果反转
       const diff = (deq + knownDelta) - (eq + (Number(enemy && enemy.痴愚) || 0));
       const verdict = diff > 0 ? '胜' : (diff < 0 ? '负' : '相持·掷骰');
-      return { winAxes, deq, eq, diff, verdict, ePoll, advantage, need, knownDelta, knownReverse: lv >= 5 };
+      return { winAxes, deq, eq, diff, verdict, ePoll, advantage, need, knownDelta, knownReverse: lv >= 6 };
     },
 
     /**
@@ -5776,8 +5788,10 @@ Schema = (() => {
         preset = pick(poolLayer.作战);
       } else if (type === '险路恶敌') {
         preset = this._pickDanger(layer);   // 隐藏层固定 希尔达；3/5 层命中收藏品规则则固定；否则原随机 boss 池
+      } else if (type === '诡意行商') {
+        preset = null;   // 诡意行商：独立于时空外的纯叙事交易节点（普瑞赛斯在世界书固定出现），无目标角色、不抽敌方
       } else {
-        preset = pick(poolLayer.非作战); // 闲暇娱乐/诡意行商等仍按原规则抽取
+        preset = pick(poolLayer.非作战); // 闲暇娱乐等仍按原规则抽取
       }
       const encounter = preset ? { name: preset.name } : null;
       // 年代只在此（进节点）掷一次：按遭遇角色查她本人的随机区间；无目标角色回退默认区间。
@@ -5840,10 +5854,14 @@ Schema = (() => {
       const tail = hiddenEv
         ? this._hiddenReportSuffix(hiddenEv)
         : ('\n请据此展开这一段剧情，并在正文末尾以 <action_options> 提供选项。');
-      const report = (pendingNote ? pendingNote + '\n' : '') + this._sys('你携带着' + (base ? ('<' + entryName + '>') : '（孤身）') + '，进入「' + type + '」（' + nodeId + '）。'
-        + (encounter ? '\n此间遭遇了 ' + year + ' 年的<' + encounter.name + '>。' : '')
-        + (hiddenEv ? '' : (noTargetTxt + presetTxt + guideTxt))
-        + tail);
+      // 诡意行商：独立于时空外的交易节点 —— 战报只写"进入<普瑞赛斯>的诡意行商节点"，
+      // 不随机目标/年代/三轴战报，不写目标与年代类变量（普瑞赛斯已在世界书固定出现），购买可自由招募多名干员。
+      const report = type === '诡意行商'
+        ? (pendingNote ? pendingNote + '\n' : '') + this._sys('你进入了<普瑞赛斯>的诡意行商节点（' + nodeId + '）。' + tail)
+        : (pendingNote ? pendingNote + '\n' : '') + this._sys('你携带着' + (base ? ('<' + entryName + '>') : '（孤身）') + '，进入「' + type + '」（' + nodeId + '）。'
+          + (encounter ? '\n此间遭遇了 ' + year + ' 年的<' + encounter.name + '>。' : '')
+          + (hiddenEv ? '' : (noTargetTxt + presetTxt + guideTxt))
+          + tail);
       this.switchView('event_node');
       this._showNodeStackOverlay();
       // 蚀刻章：遭遇当场判定（例：第一次遭遇「洁尔佩塔」→「内部爱」）

@@ -28,8 +28,23 @@ $(() => {
   //   · 前端在右侧选项栏**常驻**合成一张「离开节点」卡（desc 即本句；两次点击=展开→确认），
   //     与正文 <action_options> 选项一起出现；战斗类节点在主目标收服前不渲染该卡（_nodeCanLeave 门控）。
   //   · 诡意行商例外：保留顶端「离开节点」按钮，不渲染离开卡。
-  //   · 世界书侧已约定 AI 不再输出本简介（防双卡）；本拦截保留作兜底（万一 AI 仍输出，点击仍等效离开）。
+  //   · 旧世界书兼容：未更新世界书的玩家，AI 仍可能原样/带标点/换行/别名变体输出离开选项
+  //     （判定见 isLeaveOption：契约句包含匹配 + 保守别名）→ 显示层一律剥除、点击一律拦截，
+  //     统一由前端合成卡承担，防双卡、防误发。
   const LEAVE_OPTION_DESC = '多一事不如少一事';
+
+  // ── 旧世界书兼容：未更新世界书的玩家，AI 仍可能原样/带标点/换行/改写措辞输出"离开选项" ──
+  // 判定"离开节点"语义的正文选项（显示层剥除 + 点击拦截共用，防双卡、防误发、统一替换为前端合成卡）：
+  //   ① 世界书契约句「多一事不如少一事」宽容**包含**匹配（兼容前后缀标点/空格/省略号/语气词，且不限简介行——标题行命中同样算）；
+  //   ② 一组保守离开别名（精确匹配标题或简介；故意不收裸"离开"，防误伤剧情选项）。
+  function isLeaveOption(it) {
+    if (!it) return false;
+    const d = String(it.desc || '').trim();
+    const t = String(it.title || '').trim();
+    if (d.indexOf(LEAVE_OPTION_DESC) !== -1 || t.indexOf(LEAVE_OPTION_DESC) !== -1) return true;
+    const aliases = ['离开节点', '离开此地', '就此别过', '转身离开', '就此离去'];
+    return aliases.some((a) => d === a || t === a);
+  }
 
   // =========================================================================================
   // 【模块 0.5：MVU 变量结构（Schema）】
@@ -5920,7 +5935,7 @@ Schema = (() => {
 
     /** 在选项栏末尾追加「离开节点」合成卡：普通 .opt-card 外观（伪装），
      *  两次点击语义与正文选项一致（展开→确认）；
-     *  确认走 _pickActionOption 拦截（desc 命中 LEAVE_OPTION_DESC）→ _leaveNode，预填充/终局逻辑零改动；
+     *  确认走 _pickActionOption 拦截（isLeaveOption 命中）→ _leaveNode，预填充/终局逻辑零改动；
      *  收束态（$锁定）输入已锁死，_pickActionOption 的守卫会拦，需直连 _leaveNode。 */
     _appendLeaveCard(rail) {
       if (!rail) return;
@@ -7668,9 +7683,9 @@ Schema = (() => {
           if (descM && cur) cur.desc = descM[1].trim();
         });
       }
-      // 离开卡由前端合成：AI 若仍输出「多一事不如少一事」简介选项，显示层过滤，避免双卡
-      // （_pickActionOption 拦截分支保留作兜底——万一漏网，点击仍等效离开）。
-      const keep = items.filter((it) => !(it.desc && String(it.desc).trim() === LEAVE_OPTION_DESC));
+      // 离开入口统一由前端合成卡承担：AI 若仍输出「多一事不如少一事」（旧世界书）或离开别名选项，
+      // 显示层一律剥除（宽容匹配见 isLeaveOption），避免双卡；拦截分支保留作兜底——万一漏网，点击仍等效离开。
+      const keep = items.filter((it) => !isLeaveOption(it));
       if (!keep.length && !leave) { clear(); return; }
       // 隐藏关硬保证：本节点命中隐藏世界线时**只渲染第一个选项**，
       // 不指望 AI 一定听话（战报已要求"只能一个"，这里再兜一层，界面不会多给分支）。
@@ -7711,10 +7726,11 @@ Schema = (() => {
     _pickActionOption(it) {
       if (this._nodeLocked()) return;
       if (State.busyPhase === 'generating') return;        // 思考中禁止选选项（含离开卡拦截路径）
-      // 离开契约：简介精确命中固定句（前端合成的「离开节点」卡与 AI 兜底输出共用）→ 等效于离开本节点。
+      // 离开契约：标题/简介命中"离开"语义（isLeaveOption：契约句包含匹配 + 保守别名，
+      // 兼容旧世界书 AI 的带标点/换行/别名变体；前端合成卡也走此判定）→ 等效于离开本节点。
       // 必须在一切发送副作用（读草稿/拼消息/清输入框/拼战报）**之前**拦截并 return，
       // 拦干净：不留下任何"发送该选项"的残留。
-      if (it.desc && String(it.desc).trim() === LEAVE_OPTION_DESC) {
+      if (isLeaveOption(it)) {
         // 收服前锁定：与离开门控同口径（_nodeCanLeave），此时既不离开也不发送该选项
         if (this._nodeCanLeave()) {
           this._leaveNode();

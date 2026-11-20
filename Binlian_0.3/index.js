@@ -34,6 +34,23 @@
  *   5. 内置《前任法医的操作笔记》(原 操作手册.html 的 5 个分页内容全保留),
  *      挂在右下角常驻的小圆按钮 📝 上, 点开是覆盖层, 平时完全不占地方。
  *
+ *   6. 左上角「法医尸检报告」是个按钮: 点一下在【尸检报告】与【手机消息】两个
+ *      平级界面之间切换。手机消息界面按手机锁屏通知栏的排版来:
+ *        · 顶部居中大字时间 + 日期, 旁边是地点 (都读最新楼层变量 坐标)
+ *        · 下面一条条通知气泡: 左边按 消息/新闻 配图标 (气泡 / 报纸·图钉),
+ *          右边是略小略淡的时间, 点整条在下面展开正文
+ *        · 左右滑动气泡会露出叉号, 点叉号直接从最新楼层变量里删掉该条
+ *        · 最大宽度受限, 宽屏也只是一台手机的宽度; 壁纸从"角色收藏"里选,
+ *          默认减暗 30%
+ *   7. 悬浮球的两个独立状态: 有新手机消息 → 右上角红点 (打开过手机界面即已读,
+ *      用"消息 id+标题+时间"做已读签名, 只是新楼层没有新消息不会亮);
+ *      读不到尸检标签 → 悬浮球变灰。
+ *   8. 楼层 id 每达到 12 的倍数、且通知已满 (≥6 条) 时, 前端自动清理最旧的通知,
+ *      一直删到低于 6 条; **锁定的条目跳过**(继续找下一条)。
+ *      锁定 = 给变量键加 "_" 前缀 (如 _莲心区通告_06012100), 由右侧滑出的锁按钮切换,
+ *      AI 在变量层面就不该再更新它。锁定 ≥5 条时彻底停止自动清理, 只在手机界面底部提醒。
+ *      (单调记录已处理楼层, 玩家删楼也不会重复触发)
+ *
  * 保留的老逻辑 (一处没删): MAX_SELECT=10 上限与提示、部位名 → 小穴/后庭/口部
  * 归组、备注型选项 (CUSTOM_OPTIONS) 才出细则输入框、指令文本格式
  * 「进行{姓名}的改造+同时把玩的剧情，改造指令：（部位）：（选项、…）」、
@@ -41,11 +58,14 @@
  * 部位名与内置坐标表不一致时跳过该热点。
  *
  * 交互速查:
- *   · 悬浮球可拖动, 位置记在脚本变量里, 刷新网页后仍在; 点它打开全屏面板。
+ *   · 悬浮球可拖动, 位置记在脚本变量里, 刷新网页后仍在; 点它打开全屏面板
+ *     (有未读手机消息时直接开在手机界面)。
  *   · 脚本按钮「🔬 尸检面板」可直接打开面板,「🟢 尸检球开关」显示/隐藏悬浮球。
- *   · 顶边栏: 角色胶囊切换角色 / ↻ 重新拉取最后两层 / 档案 / × 关闭。
+ *   · 顶边栏: 左上角按钮切换界面 / 角色胶囊切换角色 / ↻ 重新拉取 / 档案 / × 关闭。
+ *   · 通知条: 点开看正文; 往右滑露出 ×(删除, 锁定的也能删); 往左滑露出 🔒(锁定/解锁)。
  *   · 关闭途径: 右上角 × / Esc (先关浮层, 再关面板)。
- *   · 控制台接口 window.__corpseBall: open / close / refresh / state / getCommand。
+ *   · 控制台接口 window.__corpseBall: open / close / refresh / view / phone /
+ *     deletePhoneMessage / togglePhoneLock / trimNow / diag / state / getCommand。
  * ============================================================================
  */
 
@@ -62,10 +82,12 @@
   const MARK = 'data-corpse-ball';
   /** 位移超过这个像素数才算拖动, 否则算点击 */
   const DRAG_THRESHOLD = 6;
-  /** 悬浮球与视口边缘的留白 (px) */
-  const EDGE_PADDING = 8;
-  /** 悬浮球默认直径 (px) */
-  const DEFAULT_BALL_SIZE = 56;
+  /** 悬浮球与视口边缘的留白 (px): 竖版胶囊横向窄, 可以更贴边 */
+  const EDGE_PADDING = 6;
+  /** 悬浮球默认高度 (px): 竖版胶囊, 宽度按 BALL_ASPECT 推出来 */
+  const DEFAULT_BALL_SIZE = 60;
+  /** 悬浮球宽高比 (竖向长方形: 40 宽 × 60 高) */
+  const BALL_ASPECT = 40 / 60;
   /** 面板淡出耗时 (ms) */
   const PANEL_FADE_MS = 200;
   /** 一次最多选几项改造 (老面板的硬限制, 原样保留) */
@@ -102,6 +124,33 @@
   /** 脚本按钮: 打开面板 / 开关悬浮球 */
   const OPEN_PANEL_BUTTON = '🔬 尸检面板';
   const BALL_TOGGLE_BUTTON = '🟢 尸检球开关';
+
+  // ---- 手机消息界面 (与尸检界面平级的另一个界面) ----
+  /** "通知已满"的阈值: 达到这个条数才算满 (不限制最多能有多少条, 超出的照常显示) */
+  const PHONE_TRIM_FULL = 6;
+  /** 楼层 id 每达到这个倍数, 若手机消息已满就自动清理 */
+  const PHONE_TRIM_EVERY = 12;
+  /** 锁定方案: 给变量键加上这个前缀 (例如 _莲心区通告_06012100), 让 AI 不再更新该条 */
+  const LOCK_PREFIX = '_';
+  /** 锁定条数达到这个数就彻底停止强制清理, 只在手机界面底部提醒 */
+  const PHONE_LOCK_STOP = 5;
+  /** 手机壁纸默认减暗程度 */
+  const PHONE_SHADE = 0.3;
+  /** 手机屏幕最大宽度 (宽屏下别把通知拉太长) */
+  const PHONE_MAX_WIDTH = 460;
+  /** 角色收藏的图库配置 (与 状态栏.html 同一份) */
+  const AVATAR_CONFIG_URL =
+    'https://cdn.jsdelivr.net/gh/ll11292631-droid/i-am-daddy@main/%E6%BB%A8%E8%8E%B2.json';
+  /** 角色立绘图链缓存 (与 状态栏.html 同一个 localStorage 键) */
+  const CHAR_IMG_CACHE_KEY = 'mvu_char_img_cache';
+  /** 已读签名最多记多少条 */
+  const SEEN_MAX = 160;
+  /** 新通知横幅停留时长 (ms) */
+  const NOTICE_MS = 3600;
+  /** 横幅最多排队几条 (超出的丢旧的) */
+  const NOTICE_QUEUE_MAX = 4;
+  /** 滑动通知时露出的删除按钮宽度 (与 CSS 里 .cp-notif__del 的 width 一致) */
+  const SWIPE_REVEAL = 64;
 
   // ============================================================================================
   // 数据源 (逐字取自 corpse7_debug.js, 勿改)
@@ -212,7 +261,7 @@
     气味: ['除臭', '定制体香'],
     声带: ['被动触发型', '智能播放型'],
     脑部: ['脑姦改造', '脑震改造', '应激低智能性爱反应'],
-    颈部: ['可拆卸头颅', '永久斩首', '超可动颈椎'],
+    颈部: ['可拆卸头颅', '永久斩首', '超可动颈椎', '头颅飞机杯'],
     眼部: ['眼交改造', '荧光瞳孔 (形/色)'],
     胸部: ['乳腺改造', '穴道改造', '丰胸', '色素净化'],
     淫纹: ['发热', '发光', '催情魅惑', '凸起', '颜色', '形态'],
@@ -398,9 +447,10 @@
   // ============================================================================================
 
   const BALL_CSS = `
+/* 竖向胶囊 + 收窄宽度: 横向更贴边, 纵向仍然好按 */
 .cpb-ball {
   position: fixed !important;
-  z-index: 9999990 !important;
+  z-index: 2147482990 !important;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -408,7 +458,7 @@
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.3);
   border-radius: 999px;
-  background: radial-gradient(circle at 32% 26%, #a9dfea 0%, #4b8fa4 46%, #16323c 100%);
+  background: radial-gradient(circle at 50% 18%, #a9dfea 0%, #4b8fa4 46%, #16323c 100%);
   box-shadow: 0 6px 20px rgba(10, 40, 52, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.5);
   color: #fff;
   cursor: pointer;
@@ -422,7 +472,7 @@
 .cpb-ball::after {
   content: '';
   position: absolute;
-  inset: -6px;
+  inset: -5px;
   border: 2px solid rgba(169, 223, 234, 0.55);
   border-radius: inherit;
   animation: cpb-pulse 2.4s ease-out infinite;
@@ -433,15 +483,102 @@
   transform: scale(1.06);
 }
 .cpb-ball:active { transform: scale(0.94); }
-.cpb-ball__icon { width: 54%; height: 54%; pointer-events: none; }
+.cpb-ball__icon { width: 62%; height: 62%; pointer-events: none; }
 .cpb-ball--dragging { cursor: grabbing; transition: none; transform: scale(1.02); }
 .cpb-ball--dragging::after { animation: none; opacity: 0; }
 .cpb-ball--hidden { opacity: 0; pointer-events: none; transform: scale(0.6); }
 
+/* 有未读手机消息: 右上角红点 (与"灰球"互相独立) */
+.cpb-ball--unread::before {
+  content: '';
+  position: absolute;
+  right: -1px;
+  top: -1px;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 35% 30%, #ff8a95, #e4344a 70%);
+  border: 2px solid #10161c;
+  box-shadow: 0 0 9px rgba(228, 52, 74, 0.9);
+  animation: cpb-dot 1.8s ease-in-out infinite;
+  pointer-events: none;
+}
+/* 读不到尸检标签: 只把球本体换成灰调, 不碰红点/图标 (不用 filter, 免得把角标一起调灰) */
+.cpb-ball--muted {
+  background: radial-gradient(circle at 34% 22%, #a7aeb2 0%, #5e666b 46%, #2a3033 100%);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+.cpb-ball--muted:hover {
+  box-shadow: 0 7px 20px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+.cpb-ball--muted::after { animation: none; opacity: 0; }
+.cpb-ball--muted .cpb-ball__icon { color: rgba(255, 255, 255, 0.72); }
+
+@keyframes cpb-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.18); opacity: 0.82; }
+}
+
+/* 新通知浮条: 在酒馆页面顶部弹几秒再自己收走 (像手机横幅通知) */
+.cpb-notice {
+  position: fixed !important;
+  left: 0;
+  top: 0;
+  z-index: 2147483050 !important;   /* 比面板还高: 面板开着也能看到 */
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(560px, 92vw);
+  padding: 10px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(18, 24, 32, 0.82);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5);
+  color: #eef4f7;
+  font-family: 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-150%);
+  transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.25, 1), opacity 0.3s ease;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.cpb-notice--in { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.cpb-notice__icon { flex: none; width: 20px; height: 20px; color: #9fd3e6; }
+.cpb-notice__icon svg { display: block; width: 100%; height: 100%; }
+.cpb-notice__body { flex: 1 1 auto; min-width: 0; }
+.cpb-notice__row { display: flex; align-items: baseline; gap: 8px; }
+.cpb-notice__title {
+  flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cpb-notice__time {
+  flex: none; font-size: 10.5px; color: rgba(233, 240, 245, 0.5);
+  font-variant-numeric: tabular-nums;
+}
+.cpb-notice__text {
+  margin-top: 2px; font-size: 12px; color: rgba(233, 240, 245, 0.74);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .cpb-panel {
   position: fixed !important;
-  inset: 0 !important;
-  z-index: 9999999;
+  left: 0 !important;
+  top: 0 !important;
+  right: auto !important;
+  bottom: auto !important;
+  /* 具体宽高由 fitPanelOverlay() 按窗口实时写死 px (见该函数注释) */
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 2147483000;
   background: rgba(3, 6, 10, 0.5);
   opacity: 1;
   transition: opacity ${PANEL_FADE_MS}ms ease;
@@ -449,7 +586,8 @@
 .cpb-panel--closing { opacity: 0; }
 .cpb-panel__iframe {
   position: absolute !important;
-  inset: 0 !important;
+  left: 0 !important;
+  top: 0 !important;
   display: block;
   width: 100% !important;
   height: 100% !important;
@@ -502,11 +640,34 @@ button { font-family: inherit; color: inherit; }
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
-.cp-brand { flex: none; display: flex; align-items: center; gap: 7px; }
+/* 左上角: 可点击的界面切换按钮 (尸检报告 ⇄ 手机消息) */
+.cp-brand {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  position: relative;
+}
+.cp-brand:hover { background: rgba(91, 138, 154, 0.26); border-color: rgba(169, 203, 214, 0.5); }
+.cp-brand:active { background: rgba(91, 138, 154, 0.38); }
 .cp-brand b { font-size: 14px; letter-spacing: 0.04em; color: #dce9ee; white-space: nowrap; }
 .cp-brand__dot {
   width: 8px; height: 8px; border-radius: 999px; background: #5b8a9a;
   box-shadow: 0 0 9px rgba(91, 138, 154, 0.95);
+  flex: none;
+}
+.cp-brand__swap { font-size: 12px; color: #7fb0c0; opacity: 0.9; }
+.cp-brand__badge {
+  position: absolute; right: -4px; top: -4px;
+  width: 10px; height: 10px; border-radius: 999px;
+  background: radial-gradient(circle at 35% 30%, #ff8a95, #e4344a 70%);
+  box-shadow: 0 0 7px rgba(228, 52, 74, 0.85);
 }
 .cp-brand__tag { font-size: 11px; color: #8ea6ae; white-space: nowrap; }
 .cp-chars {
@@ -729,6 +890,177 @@ button { font-family: inherit; color: inherit; }
 }
 .cp-tag__x:hover { background: rgba(255, 80, 80, 0.3); color: #ffd0d0; }
 
+/* ============================================================================================
+   手机消息界面 (与尸检界面平级的另一个界面, 排版按手机锁屏通知栏来)
+   ============================================================================================ */
+.cp-phone {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+}
+.cp-app.is-phone .cp-phone { display: flex; }
+.cp-app.is-phone .cp-body,
+.cp-app.is-phone .cp-tags,
+.cp-app.is-phone .cp-chars { display: none; }
+/* 手机界面里没有"受检者档案"这回事 */
+.cp-app.is-phone [data-act="open-profile"] { display: none; }
+
+.cp-phone__frame {
+  position: relative;
+  flex: none;
+  width: 100%;
+  max-width: ${PHONE_MAX_WIDTH}px;   /* 宽屏下也只是一台手机的宽度 */
+  height: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 24px;
+  background: linear-gradient(165deg, #101a2c 0%, #0a1119 55%, #06090e 100%);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+.cp-phone__bg {
+  position: absolute; inset: 0;
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+  transition: background-image 0.4s ease;
+}
+.cp-phone__shade { position: absolute; inset: 0; background: rgba(0, 0, 0, ${PHONE_SHADE}); pointer-events: none; }
+.cp-phone__glow {
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(180deg, rgba(4, 7, 12, 0.62) 0%, rgba(4, 7, 12, 0.14) 26%,
+    rgba(4, 7, 12, 0) 46%, rgba(4, 7, 12, 0.72) 100%);
+}
+.cp-phone__gear {
+  grid-column: 3; justify-self: end;
+  width: 30px; height: 30px; border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(8, 12, 18, 0.42);
+  color: #dbe7ec; font-size: 14px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.cp-phone__gear:hover { background: rgba(91, 138, 154, 0.4); }
+
+/* 锁屏头部: 时间日期居中, 地点在它旁边, 右上角是换壁纸按钮 */
+.cp-phone__top {
+  position: relative; z-index: 5; flex: none;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center; column-gap: 8px;
+  padding: 18px 12px 10px;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
+}
+.cp-phone__clockwrap { grid-column: 2; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.cp-phone__time {
+  font-size: 46px; font-weight: 250; line-height: 1.05; letter-spacing: 0.01em;
+  color: #f4f8fa; font-variant-numeric: tabular-nums;
+}
+.cp-phone__date { font-size: 13px; color: rgba(233, 240, 245, 0.74); letter-spacing: 0.06em; }
+.cp-phone__where {
+  grid-column: 1; justify-self: start;
+  display: block; max-width: 100%;
+  padding: 2px 9px; border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(8, 12, 18, 0.34);
+  font-size: 11.5px; color: rgba(233, 240, 245, 0.86);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+
+.cp-phone__list {
+  position: relative; z-index: 5; flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 8px;
+  overflow-y: auto; padding: 6px 10px 16px;
+  scrollbar-width: thin;
+}
+.cp-notif-empty {
+  margin: auto 0; padding: 30px 0; text-align: center;
+  font-size: 12.5px; color: rgba(233, 240, 245, 0.5);
+}
+
+/* 一条通知: 往右滑露出左边叉号(删除), 往左滑露出右边锁按钮(锁定/解锁) */
+.cp-notif { position: relative; flex: none; overflow: hidden; border-radius: 16px; }
+.cp-notif__del {
+  position: absolute; top: 0; bottom: 0; width: ${SWIPE_REVEAL}px;
+  display: flex; align-items: center; justify-content: center;
+  border: 0; font-size: 20px; line-height: 1; color: #fff; opacity: 0.65;
+  cursor: pointer; transition: opacity 0.15s ease;
+}
+.cp-notif__del--left { left: 0; background: linear-gradient(90deg, rgba(20, 26, 34, 0.4), rgba(0, 0, 0, 0.4)); }
+.cp-notif__del:hover { opacity: 1; }
+/* 右侧: 锁定按钮 (未锁=青色提示可锁, 已锁=金色提示可解锁) */
+.cp-notif__del--lock { right: 0; background: linear-gradient(270deg, rgba(20, 26, 34, 0.4), rgba(0, 0, 0, 0.4)); }
+.cp-notif__del--lock.is-locked {
+  background: linear-gradient(270deg, rgba(150, 118, 40, 0.94), rgba(96, 74, 24, 0.9));
+}
+.cp-notif__del--lock svg { width: 18px; height: 18px; display: block; }
+.cp-notif__body {
+  position: relative; z-index: 2;
+  /* 高度按原版 +40% (原 padding 10px 12px, 折合约 38px 高 → 现在约 54px) */
+  padding: 16px 12px; min-height: 54px;
+  border-radius: 16px;
+  /* 约 60% 透明 / 40% 不透明 */
+  background: rgba(20, 26, 34, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #eaf1f5; cursor: pointer; touch-action: pan-y;
+  transition: transform 0.18s ease, background 0.15s ease, filter 0.15s ease;
+  backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+  will-change: transform;
+}
+.cp-notif__body:hover { background: rgba(26, 33, 42, 0.5); }
+.cp-notif.is-expanded .cp-notif__body { background: rgba(24, 31, 40, 0.52); }
+.cp-notif.is-swiped .cp-notif__body { cursor: default; }
+.cp-notif.dragging .cp-notif__body { transition: none; }
+.cp-notif.is-deleting { opacity: 0.35; transition: opacity 0.15s ease; }
+.cp-notif__head { display: flex; align-items: center; gap: 8px; }
+.cp-notif__icon { flex: none; width: 18px; height: 18px; color: #9fd3e6; }
+.cp-notif__icon svg { display: block; width: 100%; height: 100%; }
+.cp-notif__title {
+  flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cp-notif__time {
+  flex: none; font-size: 10.5px; color: rgba(233, 240, 245, 0.48);
+  font-variant-numeric: tabular-nums;}
+/* 锁定标记: 跟在时间后面的一把小锁 */
+.cp-notif__lock { flex: none; width: 12px; height: 12px; color: rgba(230, 196, 120, 0.9); }
+.cp-notif__lock svg { display: block; width: 100%; height: 100%; }
+.cp-notif__content {
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12.5px; line-height: 1.72; color: rgba(233, 240, 245, 0.88);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* 手机界面底部: 通知过多提醒 (只在锁定 ≥5 条时出现) */
+.cp-phone__foot {
+  position: relative; z-index: 6; flex: none;
+  display: none; align-items: center; justify-content: center; gap: 6px;
+  margin: 0 10px 10px; padding: 6px 10px; border-radius: 999px;
+  border: 1px solid rgba(230, 196, 120, 0.32); background: rgba(48, 38, 16, 0.5);
+  font-size: 11.5px; color: rgba(240, 224, 186, 0.92);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.cp-phone__foot.is-on { display: flex; }
+
+/* 手机壁纸选择器里的缩略图网格 */
+.cp-bgpick-group { margin-bottom: 14px; }
+.cp-bgpick-group h5 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: #cfe3ea; }
+.cp-bgpick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.cp-bgpick-item {
+  position: relative; padding: 0; aspect-ratio: 3 / 4; overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 10px;
+  background: #0b1016; cursor: pointer;
+}
+.cp-bgpick-item img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.cp-bgpick-item span {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 4px;
+  font-size: 10px; color: #dbe7ec; background: rgba(0, 0, 0, 0.55);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cp-bgpick-item.is-on { border-color: #a9cbd6; box-shadow: 0 0 0 2px rgba(169, 203, 214, 0.55); }
+
 /* ---------------- 右下角常驻手册按钮 (贴在画面框右下角, 不会挡到档案栏) ---------------- */
 .cp-manual {
   position: absolute; right: 10px; bottom: 10px; z-index: 60;
@@ -815,6 +1147,7 @@ button { font-family: inherit; color: inherit; }
 /* ---------------- 窄屏适配 (布局本身由 JS 算, 这里只管字号与留白) ---------------- */
 @media (max-width: 720px) {
   .cp-top { gap: 6px; padding: 6px 8px; }
+  .cp-brand { padding: 3px 8px 3px 7px; }
   .cp-brand b { font-size: 13px; }
   .cp-hotspot { font-size: 10px; padding: 2px 6px; max-width: 5.4em; }
   .cp-hotspot--sub { min-width: 3.2em; }
@@ -825,12 +1158,21 @@ button { font-family: inherit; color: inherit; }
   .cp-sheet__body { width: 100%; max-height: 88vh; }
   .cp-detail__head h3 { font-size: 14px; }
   .cp-manual { width: 38px; height: 38px; font-size: 17px; right: 10px; bottom: 10px; }
+  .cp-phone { padding: 6px; }
+  .cp-phone__frame { border-radius: 18px; }
+  .cp-phone__top { padding: 14px 10px 8px; column-gap: 6px; }
+  .cp-phone__time { font-size: 38px; }
+  .cp-phone__date { font-size: 12px; }
+  .cp-phone__where { font-size: 10.5px; }
+  .cp-notif__title { font-size: 12.5px; }
+  .cp-notif__content { font-size: 12px; }
 }
 @media (max-width: 400px) {
   .cp-brand b { display: none; }
   .cp-brand__tag { font-size: 10px; }
   .cp-ico { min-width: 28px; padding: 0 6px; }
   .cp-tags { padding: 5px 8px 6px; }
+  .cp-phone__time { font-size: 33px; }
 }
 `;
 
@@ -841,14 +1183,16 @@ button { font-family: inherit; color: inherit; }
   const PANEL_HTML = `
 <div class="cp-app">
   <header class="cp-top">
-    <div class="cp-brand">
+    <button class="cp-brand" type="button" data-act="switch-view" data-ref="view-btn"
+      title="切换 尸检报告 / 手机消息">
       <span class="cp-brand__dot"></span>
-      <b>法医尸检报告</b>
-      <span class="cp-brand__tag" data-ref="floor-tag"></span>
-    </div>
+      <b data-ref="view-label">法医尸检报告</b>
+      <span class="cp-brand__swap">⇄</span>
+      <i class="cp-brand__badge" data-ref="view-badge" hidden></i>
+    </button>
     <div class="cp-chars" data-ref="chars"></div>
     <div class="cp-tools">
-      <button class="cp-ico" type="button" data-act="refresh" title="重新拉取最后两层消息">↻</button>
+      <button class="cp-ico" type="button" data-act="refresh" title="重新拉取最新楼层数据">↻</button>
       <button class="cp-ico" type="button" data-act="open-profile" title="受检者档案">档案</button>
       <button class="cp-ico cp-ico--danger" type="button" data-act="close" title="关闭 (Esc)">×</button>
     </div>
@@ -867,6 +1211,25 @@ button { font-family: inherit; color: inherit; }
     </div>
     <aside class="cp-side" data-ref="side"></aside>
   </div>
+
+  <!-- 手机消息界面: 与尸检界面平级, 由左上角按钮切换 -->
+  <section class="cp-phone" data-ref="phone">
+    <div class="cp-phone__frame">
+      <div class="cp-phone__bg" data-ref="phone-bg"></div>
+      <div class="cp-phone__shade"></div>
+      <div class="cp-phone__glow"></div>
+      <div class="cp-phone__top">
+        <div class="cp-phone__where" data-ref="phone-where">📍 位置未知</div>
+        <div class="cp-phone__clockwrap">
+          <div class="cp-phone__time" data-ref="phone-time">--:--</div>
+          <div class="cp-phone__date" data-ref="phone-date"></div>
+        </div>
+        <button class="cp-phone__gear" type="button" data-act="open-bg-picker" title="更换手机壁纸">🖼</button>
+      </div>
+      <div class="cp-phone__list" data-ref="phone-list"></div>
+      <div class="cp-phone__foot" data-ref="phone-foot"></div>
+    </div>
+  </section>
 
   <footer class="cp-tags" data-ref="tagbar">
     <div class="cp-tags__head">
@@ -1153,12 +1516,782 @@ button { font-family: inherit; color: inherit; }
   }
 
   // ============================================================================================
+  // 手机消息界面: 读取最新楼层变量 (MVU) 的 手机消息 / 坐标 / 角色列表
+  //   · 只读最新楼层 ("latest") 的 stat_data
+  //   · 删除通知 = 直接改最新楼层变量 (优先 Mvu.replaceMvuData, 没有则退回 replaceVariables)
+  //   · 楼层 id 达到 6 的倍数且消息已满时, 前端自动清掉一条最旧的
+  // ============================================================================================
+
+  /** 取最新楼层号 (取不到返回 -1) */
+  function latestFloorId() {
+    try {
+      if (typeof getLastMessageId === 'function') return Number(getLastMessageId()) || 0;
+    } catch (error) {
+      /* 忽略 */
+    }
+    return 0;
+  }
+
+  /** 读取最新楼层的变量表 (Mvu 优先, 退回 getVariables) */
+  function readMessageVars() {
+    try {
+      if (typeof Mvu !== 'undefined' && Mvu && typeof Mvu.getMvuData === 'function') {
+        const data = Mvu.getMvuData({ type: 'message', message_id: 'latest' });
+        if (data) return data;
+      }
+    } catch (error) {
+      console.warn(LOG_PREFIX, 'Mvu.getMvuData 失败', error);
+    }
+    try {
+      if (typeof getVariables === 'function') {
+        return getVariables({ type: 'message', message_id: 'latest' }) || {};
+      }
+    } catch (error) {
+      console.warn(LOG_PREFIX, 'getVariables 失败', error);
+    }
+    return {};
+  }
+
+  /** 写回最新楼层的变量表 */
+  async function writeMessageVars(data) {
+    if (!data) return false;
+    try {
+      if (typeof Mvu !== 'undefined' && Mvu && typeof Mvu.replaceMvuData === 'function') {
+        await Mvu.replaceMvuData(data, { type: 'message', message_id: 'latest' });
+        return true;
+      }
+    } catch (error) {
+      console.warn(LOG_PREFIX, 'Mvu.replaceMvuData 失败', error);
+    }
+    try {
+      if (typeof replaceVariables === 'function') {
+        replaceVariables(data, { type: 'message', message_id: 'latest' });
+        return true;
+      }
+    } catch (error) {
+      console.warn(LOG_PREFIX, 'replaceVariables 失败', error);
+    }
+    return false;
+  }
+
+  function statOf(data) {
+    return data && data.stat_data && typeof data.stat_data === 'object' ? data.stat_data : {};
+  }
+
+  /** 把 "新历104年3月7日 08:30" 这类字符串拆成大号时钟 + 日期 */
+  function splitClock(text) {
+    const raw = String(text || '').trim();
+    if (!raw || raw === '待初始化') return { clock: '--:--', date: '' };
+    const hit = /(\d{1,2}\s*[:：]\s*\d{2})/.exec(raw);
+    if (!hit) return { clock: '--:--', date: raw };
+    const clock = hit[1].replace(/\s+/g, '').replace('：', ':');
+    const date = raw
+      .replace(hit[1], '')
+      .replace(/^[\s,，、·\-]+/, '')
+      .replace(/[\s,，、·\-]+$/, '');
+    return { clock, date };
+  }
+
+  /** 一条手机消息的"已读签名": 用 id + 标题 + 时间 (内容改写不算新消息, 宁严勿滥) */
+  function phoneSig(msg) {
+    return msg.key + '\u0001' + msg.title + '\u0001' + msg.time;
+  }
+
+  /** 结束一次已读初始化: 首次运行把当前消息都记为已读, 但不亮红点 */
+  function ensurePhoneSeenInit() {
+    if (state.seen_init) return;
+    state.seen_init = true;
+    const seen = new Set(state.seen);
+    (state.phone.messages || []).forEach(msg => seen.add(phoneSig(msg)));
+    state.seen = Array.from(seen).slice(-SEEN_MAX);
+    saveSettings();
+  }
+
+  /** 打开过手机界面就算全部已读 */
+  function markPhoneRead() {
+    const was_init = state.seen_init;
+    const before = state.seen.length;
+    const seen = new Set(state.seen);
+    (state.phone.messages || []).forEach(msg => seen.add(phoneSig(msg)));
+    state.seen_init = true;
+    state.seen = Array.from(seen).slice(-SEEN_MAX);
+    state.phone.unread = false;
+    // 只在真的新增了已读记录时写回脚本变量, 免得每次刷新都写一遍
+    if (!was_init || state.seen.length !== before) saveSettings();
+    updateBallState();
+    updateViewBadge();
+  }
+
+  /** 从最新楼层变量重算手机界面快照 */
+  function refreshPhoneData() {
+    const stat = statOf(readMessageVars());
+    const coord = stat.坐标 && typeof stat.坐标 === 'object' ? stat.坐标 : {};
+    const place = coord.当前位置 && typeof coord.当前位置 === 'object' ? coord.当前位置 : {};
+
+    const whereParts = [place.区域, place.具体设施].filter(v => v && v !== '待初始化');
+    const clock = splitClock(coord.时间);
+
+    const raw = stat.手机消息 && typeof stat.手机消息 === 'object' ? stat.手机消息 : {};
+    const messages = Object.keys(raw).map(key => {
+      const item = raw[key] && typeof raw[key] === 'object' ? raw[key] : {};
+      return {
+        key,
+        /** 键名带 "_" 前缀 = 已锁定 (前端不强制清理, AI 也不再更新) */
+        locked: isLockedKey(key),
+        type: item.类型 === '新闻' ? '新闻' : '消息',
+        title: String(item.标题 === undefined || item.标题 === null ? '无标题' : item.标题),
+        time: String(item.时间 === undefined || item.时间 === null ? '' : item.时间),
+        content: String(item.内容 === undefined || item.内容 === null ? '' : item.内容),
+      };
+    });
+
+    state.phone.clock = clock.clock;
+    state.phone.date = clock.date;
+    state.phone.where = whereParts.length ? whereParts.join(' · ') : '位置未知';
+    state.phone.messages = messages;
+    state.phone.bg = state.settings.phone_bg || '';
+
+    const seen = new Set(state.seen);
+    state.phone.unread = state.seen_init ? messages.some(msg => !seen.has(phoneSig(msg))) : false;
+
+    // 已经不存在于数据里的展开状态清掉
+    Object.keys(state.phone.expanded).forEach(key => {
+      if (!messages.some(msg => msg.key === key)) delete state.phone.expanded[key];
+    });
+
+    // 有新的通知、而且手机界面不在眼前 → 顶部弹横幅
+    if (!phoneVisible()) maybeToastNewMessages(messages);
+
+    if (panel_doc) {
+      if (state.view === 'phone') {
+        // 人就在看手机界面: 直接算已读, 别让红点挂在别的界面上
+        markPhoneRead();
+        renderPhone();
+      } else {
+        updateViewBadge();
+      }
+    }
+    updateBallState();
+    return state.phone;
+  }
+
+  /** 删除一条手机通知: 直接从最新楼层变量里删掉该条目 */
+  async function deletePhoneMessage(key) {
+    if (!key) return;
+    const data = readMessageVars();
+    const stat = statOf(data);
+    const list = stat.手机消息;
+    if (!list || typeof list !== 'object' || !(key in list)) {
+      showToast('变量里已经没有这条消息了');
+      refreshPhoneData();
+      return;
+    }
+    delete list[key];
+    const ok = await writeMessageVars(data);
+    if (ok) showToast('已删除该通知');
+    else showToast('写回变量失败, 请确认 Mvu 正常运行');
+    refreshPhoneData();
+  }
+
+  /** 键名前缀 = 已锁定 (AI 在变量层面就不该再更新它) */
+  function isLockedKey(key) {
+    return String(key).charAt(0) === LOCK_PREFIX;
+  }
+
+  /**
+   * 锁定 / 解锁一条通知: 只改变量的键 (加/去掉 "_**" 前缀), 不动内容。
+   *
+   * 关于"能不能只改键": JS 里没有原地改键的写法, 但**不需要**"删掉整个对象再复制内容"——
+   * 只要重建 `手机消息` 这一层记录, 把改名的键放回**原来那一位**, 值对象原样复用(不深拷贝),
+   * 再用 Mvu.replaceMvuData 整表写回即可。JSON 会保留字符串键的插入顺序,
+   * 所以条目的位置、顺序和内容都不变。
+   * (若用"先 delete 再新增"的写法, 该条目会跑到记录末尾, 等于变成"最新一条",
+   *  列表顺序和"最旧优先清理"的判定都会乱, 所以这里必须保位重建。)
+   */
+  async function togglePhoneLock(key) {
+    if (!key) return;
+    const data = readMessageVars();
+    const stat = statOf(data);
+    const list = stat.手机消息;
+    if (!list || typeof list !== 'object' || !(key in list)) {
+      showToast('变量里已经没有这条通知了');
+      refreshPhoneData();
+      return;
+    }
+
+    const locking = !isLockedKey(key);
+    let nextKey = locking ? LOCK_PREFIX + key : String(key).replace(/^_+/, '');
+    if (!nextKey || nextKey === key) {
+      showToast('这个键没法改名');
+      return;
+    }
+    // 撞车就加个小尾巴, 避免覆盖别的条目
+    if (nextKey in list) nextKey = nextKey + '_' + Math.random().toString(36).slice(2, 5);
+
+    // 保位重建: 只换键名, 值和顺序都不动
+    const rebuilt = {};
+    Object.keys(list).forEach(k => {
+      rebuilt[k === key ? nextKey : k] = list[k];
+    });
+    stat.手机消息 = rebuilt;
+
+    const ok = await writeMessageVars(data);
+    if (!ok) {
+      showToast('写回变量失败, 请确认 Mvu 正常运行');
+      return;
+    }
+    migratePhoneKeyState(key, nextKey);
+    showToast(locking ? '已锁定: 前端不再强制删除, AI 也不再更新它' : '已解锁');
+    devLog((locking ? '锁定' : '解锁') + '手机消息: ' + key + ' → ' + nextKey);
+    refreshPhoneData();
+  }
+
+  /** 键改名后, 已读签名 / 展开状态 / 弹过的横幅 都跟着换键 (免得被当成新消息) */
+  function migratePhoneKeyState(oldKey, newKey) {
+    const migrate = sig => {
+      const prefix = oldKey + '\u0001';
+      return sig.indexOf(prefix) === 0 ? newKey + sig.slice(oldKey.length) : sig;
+    };
+    state.seen = state.seen.map(migrate);
+    state.toasted = state.toasted.map(migrate);
+    if (state.phone.expanded[oldKey]) {
+      state.phone.expanded[newKey] = true;
+      delete state.phone.expanded[oldKey];
+    }
+    saveSettings();
+  }
+
+  /**
+   * 楼层 id 达到 PHONE_TRIM_EVERY (12) 的倍数时, 若通知已满 (≥6 条) 就自动清理:
+   *   · 从最旧开始删,**跳过锁定的条目**;
+   *   · 一直删到低于 PHONE_TRIM_FULL (6 条) 为止;
+   *   · 锁定条数 ≥ PHONE_LOCK_STOP (5) 时完全不动手, 只在手机界面底部提醒。
+   * trim_floor 单调记录已处理的楼层, 玩家删楼也不会重复触发。
+   */
+  async function maybeTrimPhoneMessages() {
+    if (trim_running) return;
+    const floorId = latestFloorId();
+    if (!floorId || floorId % PHONE_TRIM_EVERY !== 0) return;
+    if ((state.settings.trim_floor || 0) >= floorId) return;
+
+    const data = readMessageVars();
+    const stat = statOf(data);
+    const list = stat.手机消息;
+    if (!list || typeof list !== 'object') return;
+    const keys = Object.keys(list);
+    if (keys.length < PHONE_TRIM_FULL) return; // 还没满, 不管
+
+    // 锁定够多就彻底停手 (但记下这一楼已处理过, 免得同层反复检查)
+    const lockedCount = keys.filter(isLockedKey).length;
+    if (lockedCount >= PHONE_LOCK_STOP) {
+      state.settings.trim_floor = floorId;
+      saveSettings();
+      devLog('楼层 ' + floorId + ': 已锁定 ' + lockedCount + ' 条 (≥' + PHONE_LOCK_STOP + '), 跳过自动清理');
+      return;
+    }
+
+    trim_running = true;
+    try {
+      const removed = [];
+      let remaining = keys.length;
+      for (const key of keys) {
+        if (remaining < PHONE_TRIM_FULL) break; // 已降到阈值以下
+        if (isLockedKey(key)) continue; // 锁定的跳过, 继续找下一条
+        delete list[key];
+        removed.push(key);
+        remaining -= 1;
+      }
+      if (!removed.length) {
+        state.settings.trim_floor = floorId;
+        saveSettings();
+        return;
+      }
+      const ok = await writeMessageVars(data);
+      if (ok) {
+        state.settings.trim_floor = floorId;
+        saveSettings();
+        devLog(
+          '楼层 ' + floorId + ' 达到 ' + PHONE_TRIM_EVERY + ' 的倍数, 自动清理 ' + removed.length + ' 条最旧手机消息: ' + removed.join(', '),
+        );
+        refreshPhoneData();
+      }
+    } finally {
+      trim_running = false;
+    }
+  }
+
+  // ---- 手机界面用的图标 (纯 CSS/内联 SVG, 不依赖任何网图) ----
+  const ICON_MSG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">' +
+    '<path d="M20 5.6H4A1.6 1.6 0 0 0 2.4 7.2v8.6A1.6 1.6 0 0 0 4 17.4h2.1v3.2l4.1-3.2H20a1.6 1.6 0 0 0 1.6-1.6V7.2A1.6 1.6 0 0 0 20 5.6Z"/>' +
+    '</svg>';
+  const ICON_NEWS =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">' +
+    '<rect x="3.2" y="4.9" width="17.6" height="14.2" rx="1.9"/>' +
+    '<path d="M6.3 8.7h6.6M6.3 11.7h6.6M6.3 14.7h11.4M15.4 8.7h2.3"/>' +
+    '</svg>';
+  const ICON_PIN =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">' +
+    '<path d="M12 21.2s6.3-6.2 6.3-10.5A6.3 6.3 0 0 0 5.7 10.7c0 4.3 6.3 10.5 6.3 10.5Z"/>' +
+    '<circle cx="12" cy="10.6" r="2.2"/>' +
+    '</svg>';
+  /** 锁定 / 解锁用的两把小锁 (锁上 = 实心锁, 解锁 = 开锁) */
+  const ICON_LOCK =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">' +
+    '<rect x="4.6" y="10.4" width="14.8" height="9.6" rx="2.2"/>' +
+    '<path d="M8.2 10.4V7.8a3.8 3.8 0 0 1 7.6 0v2.6"/>' +
+    '<circle cx="12" cy="15.2" r="1.3"/>' +
+    '</svg>';
+  const ICON_UNLOCK =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">' +
+    '<rect x="4.6" y="10.4" width="14.8" height="9.6" rx="2.2"/>' +
+    '<path d="M8.2 10.4V7.8a3.8 3.8 0 0 1 7.3-1.3"/>' +
+    '<circle cx="12" cy="15.2" r="1.3"/>' +
+    '</svg>';
+
+  /** 按消息类型选图标: 新闻 → 报纸/图钉 (按 id 稳定随机), 消息 → 气泡 */
+  function phoneIcon(msg) {
+    if (msg.type !== '新闻') return ICON_MSG;
+    const num = Math.abs(parseInt(hashOf(msg.key + '\u0001' + msg.title), 10)) || 0;
+    return num % 2 === 0 ? ICON_NEWS : ICON_PIN;
+  }
+
+  /** 渲染整个手机界面 */
+  function renderPhone() {
+    if (!panel_doc || !panel_refs) return;
+    const phone = state.phone;
+    setText('phone-time', phone.clock || '--:--');
+    setText('phone-date', phone.date || '');
+    setText('phone-where', '📍 ' + (phone.where || '位置未知'));
+
+    const bg = panel_refs['phone-bg'];
+    if (bg) {
+      if (phone.bg) {
+        bg.style.backgroundImage = 'url("' + String(phone.bg).replace(/"/g, '%22') + '")';
+      } else {
+        bg.style.backgroundImage = '';
+      }
+    }
+
+    const list = panel_refs['phone-list'];
+    if (!list) return;
+    const messages = phone.messages || [];
+
+    // 底部提醒: 锁定够多时说明"通知过多, 自动清理已暂停"
+    const foot = panel_refs['phone-foot'];
+    if (foot) {
+      const lockedCount = messages.filter(msg => msg.locked).length;
+      const tooMany = lockedCount >= PHONE_LOCK_STOP;
+      foot.classList.toggle('is-on', tooMany);
+      foot.textContent = tooMany
+        ? '🔒 已锁定 ' + lockedCount + ' 条通知 · 自动清理已暂停（通知过多，共 ' + messages.length + ' 条）'
+        : '';
+    }
+
+    if (!messages.length) {
+      list.innerHTML = '<div class="cp-notif-empty">暂无手机消息</div>';
+      return;
+    }
+    list.innerHTML = messages
+      .map(msg => {
+        const expanded = Boolean(phone.expanded[msg.key]);
+        const key = attr(msg.key);
+        const lockIcon = msg.locked ? '<span class="cp-notif__lock" title="已锁定">' + ICON_LOCK + '</span>' : '';
+        return (
+          '<div class="cp-notif' +
+          (expanded ? ' is-expanded' : '') +
+          (msg.locked ? ' is-locked' : '') +
+          '" data-key="' +
+          key +
+          '">' +
+          // 往右滑露出的左边叉号: 删除 (锁定的也能手动删)
+          '<button class="cp-notif__del cp-notif__del--left" type="button" data-act="del-notif" data-key="' +
+          key +
+          '" title="删除这条通知">×</button>' +
+          '<div class="cp-notif__body" data-act="toggle-notif" data-key="' +
+          key +
+          '">' +
+          '<div class="cp-notif__head">' +
+          '<span class="cp-notif__icon">' +
+          phoneIcon(msg) +
+          '</span>' +
+          '<span class="cp-notif__title">' +
+          esc(msg.title) +
+          '</span>' +
+          '<span class="cp-notif__time">' +
+          esc(msg.time) +
+          '</span>' +
+          lockIcon +
+          '</div>' +
+          (expanded
+            ? '<div class="cp-notif__content">' + esc(msg.content || '（这条通知没有正文）') + '</div>'
+            : '') +
+          '</div>' +
+          // 往左滑露出的右边锁按钮: 锁定 / 解锁
+          '<button class="cp-notif__del cp-notif__del--lock' +
+          (msg.locked ? ' is-locked' : '') +
+          '" type="button" data-act="lock-notif" data-key="' +
+          key +
+          '" title="' +
+          (msg.locked ? '解除锁定' : '锁定该条: 不再被自动清理, AI 也不再更新它') +
+          '">' +
+          (msg.locked ? ICON_UNLOCK : ICON_LOCK) +
+          '</button>' +
+          '</div>'
+        );
+      })
+      .join('');
+  }
+
+  /** 点通知: 展开/收起正文 */
+  function toggleNotif(key) {
+    if (!key) return;
+    if (state.phone.expanded[key]) delete state.phone.expanded[key];
+    else state.phone.expanded[key] = true;
+    renderPhone();
+  }
+
+  /** 顶栏右上角/悬浮球的红点状态 */
+  function updateViewBadge() {
+    const badge = panel_refs && panel_refs['view-badge'];
+    if (badge) badge.hidden = !(state.phone.unread && state.view !== 'phone');
+  }
+
+  /**
+   * 悬浮球的两个独立状态:
+   *   · 红点: 有未读手机消息
+   *   · 变灰: 读不到尸检标签 (与红点互不影响)
+   */
+  function updateBallState() {
+    if (!ball_el) return;
+    ball_el.classList.toggle('cpb-ball--unread', Boolean(state.phone.unread));
+    ball_el.classList.toggle('cpb-ball--muted', !state.corpses.length);
+    const tip = [];
+    if (state.phone.unread) tip.push('有新的手机消息');
+    if (!state.corpses.length) tip.push('当前楼层没有可读的尸检标签');
+    tip.push('点击打开面板 (可拖动)');
+    ball_el.title = tip.join(' · ');
+  }
+
+  // ============================================================================================
+  // 新通知横幅: 在酒馆页面顶部弹几秒再收走 (像手机横幅通知), 点它直接开手机界面
+  // ============================================================================================
+
+  /** 手机界面此刻是否真的在眼前 (否则才弹横幅) */
+  function phoneVisible() {
+    return Boolean(panel_doc) && state.view === 'phone' && Boolean(panel_el && panel_el.isConnected);
+  }
+
+  /** 挑出"新的、还没弹过的"通知, 排队弹横幅 */
+  function maybeToastNewMessages(messages) {
+    if (!state.seen_init) return; // 首次运行不弹, 免得一上来就刷屏
+    const seen = new Set(state.seen);
+    const toasted = new Set(state.toasted);
+    const fresh = (messages || []).filter(msg => {
+      const sig = phoneSig(msg);
+      return !seen.has(sig) && !toasted.has(sig);
+    });
+    if (!fresh.length) return;
+
+    fresh.forEach(msg => {
+      state.toasted.push(phoneSig(msg));
+      notice_queue.push(msg);
+    });
+    if (state.toasted.length > 80) state.toasted = state.toasted.slice(-80);
+    if (notice_queue.length > NOTICE_QUEUE_MAX) notice_queue = notice_queue.slice(-NOTICE_QUEUE_MAX);
+    runNoticeQueue();
+  }
+
+  function runNoticeQueue() {
+    if (notice_timer || notice_el) return; // 正在显示
+    const next = notice_queue.shift();
+    if (!next) return;
+    showNotice(next);
+  }
+
+  function showNotice(msg) {
+    if (!host_doc || !host_doc.body) return;
+    hideNotice(true);
+    const view = viewportSize();
+
+    const el = host_doc.createElement('div');
+    el.className = 'cpb-notice';
+    el.setAttribute(MARK, 'notice');
+    el.innerHTML =
+      '<span class="cpb-notice__icon">' +
+      phoneIcon(msg) +
+      '</span>' +
+      '<div class="cpb-notice__body">' +
+      '<div class="cpb-notice__row">' +
+      '<b class="cpb-notice__title">' +
+      esc(msg.title) +
+      '</b>' +
+      '<span class="cpb-notice__time">' +
+      esc(msg.time) +
+      '</span>' +
+      '</div>' +
+      '<div class="cpb-notice__text">' +
+      esc(String(msg.content || '').replace(/\s+/g, ' ') || '（无正文）') +
+      '</div>' +
+      '</div>';
+    host_doc.body.appendChild(el);
+    notice_el = el;
+
+    // 位置写死 px: 顶部居中, 窄屏往下让一点避开酒馆顶栏
+    const width = el.offsetWidth || 320;
+    const top = view.w <= 1000 ? 54 : 14;
+    applyImportant(el, { left: Math.max(6, Math.round((view.w - width) / 2)) + 'px', top: top + 'px' });
+
+    // 下一帧进场, 让 transition 生效
+    host_win.setTimeout(() => {
+      if (notice_el === el) el.classList.add('cpb-notice--in');
+    }, 16);
+
+    el.addEventListener('click', () => {
+      hideNotice(true);
+      openPhoneView();
+    });
+
+    notice_timer = host_win.setTimeout(() => {
+      notice_timer = null;
+      hideNotice(false);
+      host_win.setTimeout(runNoticeQueue, 340);
+    }, NOTICE_MS);
+  }
+
+  function hideNotice(immediate) {
+    if (notice_timer) {
+      host_win.clearTimeout(notice_timer);
+      notice_timer = null;
+    }
+    const el = notice_el;
+    notice_el = null;
+    if (!el) return;
+    el.classList.remove('cpb-notice--in');
+    if (immediate) {
+      if (el.parentNode) el.parentNode.removeChild(el);
+      return;
+    }
+    host_win.setTimeout(() => {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    }, 340);
+  }
+
+  /** 打开手机界面 (面板已开着就切视图) */
+  function openPhoneView() {
+    if (panel_el) {
+      setView('phone');
+      return;
+    }
+    state.view = 'phone';
+    openPanel();
+  }
+
+  // ============================================================================================
+  // 手机壁纸: 从"角色收藏"里取可用图片 (逻辑照抄 状态栏.html 的 getCharImages)
+  // ============================================================================================
+
+  /** 读整个角色立绘图链缓存 */
+  function readCharImgCache() {
+    const stores = [];
+    try {
+      if (host_win && host_win.localStorage) stores.push(host_win.localStorage);
+    } catch (error) {
+      /* 忽略 */
+    }
+    try {
+      stores.push(window.localStorage);
+    } catch (error) {
+      /* 忽略 */
+    }
+    for (const store of stores) {
+      try {
+        const map = JSON.parse(store.getItem(CHAR_IMG_CACHE_KEY) || '{}');
+        if (map && typeof map === 'object') return map;
+      } catch (error) {
+        /* 忽略 */
+      }
+    }
+    return {};
+  }
+
+  /** 罩杯 + 发型 → 条件匹配的键 (与 状态栏.html 一致) */
+  function conditionKeyOf(charData) {
+    const cupStr = String((charData && charData.罩杯) || '').toLowerCase();
+    let cup = '中';
+    if (/[a]/.test(cupStr) || /小/.test(cupStr)) cup = '小';
+    else if (/[b-c]/.test(cupStr)) cup = '中';
+    else if (/[d-z]/.test(cupStr) || /大|巨/.test(cupStr)) cup = '大';
+
+    const hairStr = String((charData && charData.发型) || '');
+    let hair = '低马尾';
+    const hairPriorities = ['低双马尾', '盘发', '麻花辫', '低马尾', '卷发', '侧马尾', '双马尾', '长发', '短发', '马尾'];
+    for (const candidate of hairPriorities) {
+      if (hairStr.indexOf(candidate) >= 0) {
+        hair = candidate;
+        break;
+      }
+    }
+    return cup + ', ' + hair;
+  }
+
+  /** 解析某个角色可用的图片列表 (只有能在收藏里匹配到图, 才允许选) */
+  function resolveCharGallery(name, charData, cache) {
+    const cached = cache && cache[name] ? String(cache[name]) : '';
+    const cfg = state.avatar_config;
+    if (!cfg) return { avatar: cached, gallery: cached ? [cached] : [] };
+
+    let exactKey = null;
+    const exact = cfg['精确匹配'];
+    if (exact && typeof exact === 'object') {
+      exactKey = Object.keys(exact).find(key => String(name).indexOf(key) >= 0);
+    }
+    if (exactKey) {
+      const imgs = exact[exactKey];
+      const gallery = Array.isArray(imgs) ? imgs.slice() : [imgs];
+      return { avatar: cached || gallery[0], gallery };
+    }
+
+    const key = conditionKeyOf(charData);
+    const pool =
+      cfg[key] ||
+      (cfg['条件匹配'] && typeof cfg['条件匹配'] === 'object' ? cfg['条件匹配'][key] : null) ||
+      cfg['无匹配'];
+
+    if (Array.isArray(pool) && pool.length) return { avatar: cached || pool[0], gallery: pool.slice() };
+    if (typeof pool === 'string') return { avatar: cached || pool, gallery: [pool] };
+    return { avatar: cached, gallery: cached ? [cached] : [] };
+  }
+
+  /** 角色收藏 → 可选壁纸列表 */
+  function buildBgOptions() {
+    const stat = statOf(readMessageVars());
+    const chars = stat.角色列表 && typeof stat.角色列表 === 'object' ? stat.角色列表 : {};
+    const cache = readCharImgCache();
+    const out = [];
+    Object.keys(chars).forEach(name => {
+      const info = resolveCharGallery(name, chars[name] || {}, cache);
+      if (info.gallery && info.gallery.length) {
+        out.push({ name, images: info.gallery.filter(url => typeof url === 'string' && url) });
+      }
+    });
+    return out.filter(group => group.images.length);
+  }
+
+  /** 拉图库配置 + 生成壁纸候选 (打开选择器时调用) */
+  async function loadBgOptions(force) {
+    if (state.bg_loading) return;
+    if (state.bg_options && !force) return;
+    state.bg_loading = true;
+    if (panel_doc && state.sheet === 'phone-bg') renderSheet();
+    try {
+      if (!state.avatar_config && typeof fetch === 'function') {
+        const res = await fetch(AVATAR_CONFIG_URL + '?t=' + Date.now(), { cache: 'no-store' });
+        if (res && res.ok) state.avatar_config = await res.json();
+      }
+    } catch (error) {
+      console.warn(LOG_PREFIX, '拉取角色图库配置失败 (只能用本地缓存里的头像图)', error);
+    }
+    state.bg_loading = false;
+    state.bg_options = buildBgOptions();
+    if (panel_doc && state.sheet === 'phone-bg') renderSheet();
+  }
+
+  function buildBgPickerHtml() {
+    const current = String(state.settings.phone_bg || '');
+    let html =
+      '<div class="cp-sheet__head"><h3>🖼 手机壁纸</h3>' +
+      '<button class="cp-ico cp-ico--danger" type="button" data-act="close-sheet" title="关闭">×</button></div>' +
+      '<div class="cp-sheet__scroll">';
+
+    if (state.bg_loading) {
+      html += '<p class="cp-muted">正在从角色收藏里读取可用图片…</p>';
+    } else if (!state.bg_options || !state.bg_options.length) {
+      html += '<p class="cp-muted">角色收藏里没有可用图片。需要变量 角色列表 里有角色, 且图库配置能匹配到她的图。</p>';
+    } else {
+      html += state.bg_options
+        .map(group => {
+          return (
+            '<div class="cp-bgpick-group"><h5>' +
+            esc(group.name) +
+            '</h5><div class="cp-bgpick-grid">' +
+            group.images
+              .map(
+                url =>
+                  '<button class="cp-bgpick-item' +
+                  (url === current ? ' is-on' : '') +
+                  '" type="button" data-act="pick-bg" data-url="' +
+                  attr(url) +
+                  '" title="用这张当手机壁纸"><img src="' +
+                  attr(url) +
+                  '" loading="lazy" alt=""><span>' +
+                  esc(group.name) +
+                  '</span></button>',
+              )
+              .join('') +
+            '</div></div>'
+          );
+        })
+        .join('');
+    }
+
+    html +=
+      '<button class="cp-ico" type="button" data-act="clear-bg" style="margin-top:8px">恢复默认壁纸</button>' +
+      '<button class="cp-ico" type="button" data-act="reload-bg" style="margin-top:8px;margin-left:8px">重新读取图库</button>';
+    if (state.avatar_config === null && !state.bg_loading) {
+      html += '<p class="cp-muted" style="margin-top:10px">（图库配置没拉到, 现在只能用本地缓存里的头像图）</p>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // ============================================================================================
+  // 界面切换: 尸检报告 ⇄ 手机消息
+  // ============================================================================================
+
+  function renderViewState() {
+    const app = appEl();
+    if (app) app.classList.toggle('is-phone', state.view === 'phone');
+    setText('view-label', state.view === 'phone' ? '手机消息' : '法医尸检报告');
+    const btn = panel_refs && panel_refs['view-btn'];
+    if (btn) btn.setAttribute('title', state.view === 'phone' ? '切换到尸检报告' : '切换到手机消息');
+    updateViewBadge();
+  }
+
+  function setView(view) {
+    const next = view === 'phone' ? 'phone' : 'corpse';
+    if (state.view === next) return;
+    state.view = next;
+    state.sheet = '';
+    renderViewState();
+    renderSheet();
+    if (next === 'phone') {
+      refreshPhoneData();
+      markPhoneRead(); // 打开过手机界面就算已读
+      renderPhone();
+    } else {
+      renderMedia();
+      renderTagbar();
+      layoutFrame();
+    }
+    updateBallState();
+    devLog('切换到界面: ' + (next === 'phone' ? '手机消息' : '尸检报告'));
+  }
+  // ============================================================================================
   // 状态
   // ============================================================================================
 
   const state = {
     /** 悬浮球位置与直径, 会写回脚本变量 */
-    settings: { ball_x: null, ball_y: null, ball_size: DEFAULT_BALL_SIZE },
+    settings: {
+      ball_x: null,
+      ball_y: null,
+      ball_size: DEFAULT_BALL_SIZE,
+      /** 手机壁纸图链 (空 = 默认渐变) */
+      phone_bg: '',
+      /** 已经自动清理过手机消息的最新楼层号 (单调递增, 防重复清理) */
+      trim_floor: 0,
+    },
     ball_left: 0,
     ball_top: 0,
     /** 用户是否想看到悬浮球 (面板打开时临时隐藏) */
@@ -1175,12 +2308,36 @@ button { font-family: inherit; color: inherit; }
     tab: 'main',
     /** 当前展开的部位操作浮层 */
     detail_part: '',
-    /** 当前覆盖层: '' | 'profile' | 'manual' */
+    /** 当前覆盖层: '' | 'profile' | 'manual' | 'phone-bg' */
     sheet: '',
     /** 手册当前分页 */
     manual_tab: 0,
-    /** 面板最后写到输入框的文本 (用于判断输入框是否被手动改过) */
+    /** 面板最后写到输入框的文本 (用于判断输入框是否被手工改过) */
     last_written: null,
+    /** 当前界面: 'corpse' (尸检报告) | 'phone' (手机消息) */
+    view: 'corpse',
+    /** 手机消息的数据快照 (从最新楼层变量里读) */
+    phone: {
+      clock: '--:--',
+      date: '',
+      where: '位置未知',
+      messages: [],
+      /** 展开正文的消息 key 集合 */
+      expanded: {},
+      unread: false,
+      bg: '',
+    },
+    /** 手机消息已读签名 (用于红点判定, 会持久化) */
+    seen: [],
+    /** 已经弹过横幅的通知签名 (只在本次运行内有效, 不持久化) */
+    toasted: [],
+    /** 是否已经做过一次"已读初始化" (首次运行不亮红点) */
+    seen_init: false,
+    /** 角色收藏里可选的壁纸 (名称 → 图片列表), 由图库配置算出来 */
+    bg_options: null,
+    /** 图库配置原文 (与 状态栏.html 同一份) */
+    avatar_config: null,
+    bg_loading: false,
   };
 
   // DOM 引用
@@ -1203,6 +2360,18 @@ button { font-family: inherit; color: inherit; }
   let reverse_timer = null;
   let toast_timer = null;
   let refresh_timer = null;
+  /** 通知滑动的临时状态 */
+  let swipe_state = null;
+  /** 刚滑动过就在这段时间内抑制 click (免得滑完顺手把正文展开了) */
+  let swipe_suppress_until = 0;
+  /** 新通知横幅的队列与当前元素 */
+  let notice_queue = [];
+  let notice_el = null;
+  let notice_timer = null;
+  /** 正在自动清理手机消息 (防重入) */
+  let trim_running = false;
+  /** MVU 事件是否已经注册过 (MVU 异步就绪, 可能注册两次) */
+  let mvu_listener_done = false;
 
   // ============================================================================================
   // 起始: 找到酒馆网页本身 (脚本运行在自己的 iframe 里, 要操作的是父页面)
@@ -1230,7 +2399,8 @@ button { font-family: inherit; color: inherit; }
 
   function sanitizeSize(value) {
     const size = Number(value);
-    return Number.isFinite(size) ? clamp(Math.round(size), 32, 120) : DEFAULT_BALL_SIZE;
+    // 存的是"高度", 宽度由宽高比推出来
+    return Number.isFinite(size) ? clamp(Math.round(size), 40, 130) : DEFAULT_BALL_SIZE;
   }
 
   function sanitizeCoord(value) {
@@ -1248,6 +2418,13 @@ button { font-family: inherit; color: inherit; }
       state.settings.ball_x = sanitizeCoord(raw.ball_x);
       state.settings.ball_y = sanitizeCoord(raw.ball_y);
       state.settings.ball_size = sanitizeSize(raw.ball_size);
+      // 手机界面相关
+      state.settings.phone_bg = typeof raw.phone_bg === 'string' ? raw.phone_bg : '';
+      state.settings.trim_floor = sanitizeCoord(raw.trim_floor) || 0;
+      state.seen = Array.isArray(raw.seen_msgs)
+        ? raw.seen_msgs.filter(item => typeof item === 'string').slice(-SEEN_MAX)
+        : [];
+      state.seen_init = raw.seen_init === true;
     } catch (error) {
       console.warn(LOG_PREFIX, '读取脚本变量失败, 使用默认设置', error);
     }
@@ -1258,6 +2435,10 @@ button { font-family: inherit; color: inherit; }
       ball_x: state.settings.ball_x,
       ball_y: state.settings.ball_y,
       ball_size: state.settings.ball_size,
+      phone_bg: state.settings.phone_bg || '',
+      trim_floor: state.settings.trim_floor || 0,
+      seen_msgs: state.seen.slice(-SEEN_MAX),
+      seen_init: state.seen_init === true,
     };
     try {
       if (typeof insertOrAssignVariables === 'function') {
@@ -1272,8 +2453,14 @@ button { font-family: inherit; color: inherit; }
     }
   }
 
+  /** 悬浮球高度 (= 设置里存的 ball_size) */
   function ballSize() {
     return Math.round(state.settings.ball_size || DEFAULT_BALL_SIZE);
+  }
+
+  /** 悬浮球宽度 (竖版胶囊: 高度 × 宽高比) */
+  function ballWidth() {
+    return Math.max(24, Math.round(ballSize() * BALL_ASPECT));
   }
 
   // ============================================================================================
@@ -1576,11 +2763,15 @@ button { font-family: inherit; color: inherit; }
   }
 
   function afterDataLoaded() {
+    // 尸检数据与手机消息互不影响: 都刷一遍
+    refreshPhoneData();
+    updateBallState();
     if (!panel_doc) return;
     renderChars();
     renderMedia();
     renderTagbar();
     layoutFrame();
+    if (state.view === 'phone') renderPhone();
   }
 
   // ============================================================================================
@@ -1594,13 +2785,6 @@ button { font-family: inherit; color: inherit; }
 
   function setTagHint(text) {
     setText('tag-hint', text || '');
-  }
-
-  function floorTagText() {
-    const ids = state.floor_ids;
-    if (!ids.length) return '';
-    if (ids.length === 1) return '楼 ' + ids[0];
-    return '楼 ' + ids[0] + '–' + ids[ids.length - 1];
   }
 
   function renderChars() {
@@ -1629,7 +2813,6 @@ button { font-family: inherit; color: inherit; }
         })
         .join('');
     }
-    setText('floor-tag', floorTagText());
   }
 
   // ============================================================================================
@@ -1744,14 +2927,13 @@ button { font-family: inherit; color: inherit; }
   }
 
   function buildEmptyHtml() {
-    const floorText = floorTagText();
     const tips = state.corpses.length
       ? '<p>当前没有任何角色数据, 点下面的按钮重新拉取。</p>'
       : '<p>只认「酒馆最后 ' +
         DEPTH_FLOORS +
         ' 层消息」里的 <code>[[corpse_data]]</code>…<code>[[/corpse_data]]</code> 标签。<br />' +
-        (floorText ? '已读取 ' + floorText + '。' : '还没读到任何楼层。') +
-        ' 标签内容需要同时包含「姓名:」与「部位状态:」两段, 且长度大于 50 字。</p>';
+        '标签内容需要同时包含「姓名:」与「部位状态:」两段, 且长度大于 50 字。<br />' +
+        '（手机消息界面不受影响, 点左上角按钮可以切过去）</p>';
     return (
       '<h2>没有可用的尸检数据</h2>' +
       tips +
@@ -2055,6 +3237,12 @@ button { font-family: inherit; color: inherit; }
     }
     sheet.hidden = false;
 
+    if (state.sheet === 'phone-bg') {
+      body.innerHTML = buildBgPickerHtml();
+      if (!state.bg_options && !state.bg_loading) loadBgOptions();
+      return;
+    }
+
     if (state.sheet === 'profile') {
       const corpse = activeCorpse();
       const rows = corpse ? profileRows(corpse) : [];
@@ -2129,7 +3317,7 @@ button { font-family: inherit; color: inherit; }
   // ============================================================================================
 
   function showToast(text) {
-    if (!panel_doc) return;
+    if (!panel_doc || typeof panel_doc.createElement !== 'function') return;
     let toast = panel_doc.querySelector('.cp-toast');
     if (!toast) {
       toast = panel_doc.createElement('div');
@@ -2275,16 +3463,133 @@ button { font-family: inherit; color: inherit; }
     renderSheet();
   }
 
+  // ---- 通知条左右滑动露出叉号 ----
+
+  /** 收回已滑开的通知 (keepRow 指定的那条不动) */
+  function closeOtherSwipes(keepRow) {
+    if (!panel_doc) return;
+    panel_doc.querySelectorAll('.cp-notif.is-swiped').forEach(row => {
+      if (keepRow && row === keepRow) return;
+      row.classList.remove('is-swiped');
+      row.removeAttribute('data-swiped');
+      const body = row.querySelector('.cp-notif__body');
+      if (body) body.style.transform = '';
+    });
+  }
+
+  /** 把所有已滑开的通知收回去 */
+  function closeAllSwipes() {
+    closeOtherSwipes(null);
+  }
+
+  function onPhonePointerDown(event) {
+    if (!event.isPrimary) return;
+    const target = event.target;
+    const body = target && target.closest ? target.closest('.cp-notif__body') : null;
+    if (!body) return;
+    if (target.closest('[data-act="del-notif"]') || target.closest('[data-act="lock-notif"]')) return;
+    const row = body.closest('.cp-notif');
+    // 已经滑开的那一条: 从当前偏移量接着拖, 这样玩家才能"主动回划"复位
+    const swiped = Boolean(row && row.classList.contains('is-swiped'));
+    let base = 0;
+    if (swiped) base = row.getAttribute('data-swiped') === 'left' ? SWIPE_REVEAL : -SWIPE_REVEAL;
+    swipe_state = {
+      pointer_id: event.pointerId,
+      start_x: event.clientX,
+      start_y: event.clientY,
+      base,
+      was_swiped: swiped,
+      dx: base,
+      active: false,
+      body,
+      row,
+    };
+  }
+
+  function onPhonePointerMove(event) {
+    if (!swipe_state || swipe_state.pointer_id !== event.pointerId) return;
+    const raw = swipe_state.base + (event.clientX - swipe_state.start_x);
+    const dy = event.clientY - swipe_state.start_y;
+    if (!swipe_state.active) {
+      // 竖向滑动优先交给列表滚动
+      if (Math.abs(raw - swipe_state.base) < 8 || Math.abs(raw - swipe_state.base) <= Math.abs(dy)) return;
+      swipe_state.active = true;
+      if (swipe_state.row) swipe_state.row.classList.add('dragging');
+      try {
+        swipe_state.body.setPointerCapture(event.pointerId);
+      } catch (error) {
+        /* 忽略 */
+      }
+    }
+    swipe_state.dx = clamp(raw, -SWIPE_REVEAL, SWIPE_REVEAL);
+    swipe_state.body.style.transform = 'translateX(' + swipe_state.dx + 'px)';
+    if (event.cancelable) event.preventDefault();
+  }
+
+  /**
+   * 松手时吸附 (带滞回, 免得手一抖就把叉号弄没了):
+   *   · 未滑开时: 位移接近尽头 (≥82%) 才吸附到尽头并**保持**, 不自己弹回, 以便点叉号;
+   *   · 已滑开时: 只有主动回划到 ≤50% 才复位, 中间区间保持原样。
+   */
+  function finishSwipe(cancelled) {
+    const current = swipe_state;
+    swipe_state = null;
+    if (!current) return;
+    if (current.row) current.row.classList.remove('dragging');
+    if (!current.active) return; // 只是点击, 交给 click 处理
+
+    const openAt = SWIPE_REVEAL * 0.82;
+    const closeAt = SWIPE_REVEAL * 0.5;
+    const offset = Math.abs(current.dx);
+    const shouldOpen = cancelled
+      ? current.was_swiped
+      : current.was_swiped
+        ? offset > closeAt
+        : offset >= openAt;
+
+    if (shouldOpen) {
+      const dir = current.dx >= 0 ? 'left' : 'right'; // 往右滑 → 左边露出叉号
+      const snap = dir === 'left' ? SWIPE_REVEAL : -SWIPE_REVEAL;
+      current.body.style.transform = 'translateX(' + snap + 'px)';
+      if (current.row) {
+        current.row.classList.add('is-swiped');
+        current.row.setAttribute('data-swiped', dir);
+      }
+    } else {
+      current.body.style.transform = '';
+      if (current.row) {
+        current.row.classList.remove('is-swiped');
+        current.row.removeAttribute('data-swiped');
+      }
+    }
+    // 滑完 260ms 内不要把这个抬手当成点击
+    swipe_suppress_until = Date.now() + 260;
+  }
+
+  function onPhonePointerUp(event) {
+    if (!swipe_state || swipe_state.pointer_id !== event.pointerId) return;
+    finishSwipe(false);
+  }
+
+  function onPhonePointerCancel(event) {
+    if (!swipe_state || swipe_state.pointer_id !== event.pointerId) return;
+    finishSwipe(true);
+  }
+
   function onPanelClick(event) {
     const el = event.target && event.target.closest ? event.target.closest('[data-act]') : null;
     if (!el) return;
     const act = el.getAttribute('data-act');
+    // 注意: 这里不再"点别处就把滑开的通知收回去" —— 吸附后要玩家自己回划才复位
     switch (act) {
       case 'close':
         closePanel();
         break;
       case 'refresh':
         refreshData();
+        break;
+      case 'switch-view':
+        setView(state.view === 'phone' ? 'corpse' : 'phone');
         break;
       case 'select-char':
         selectChar(el.getAttribute('data-id'));
@@ -2316,6 +3621,32 @@ button { font-family: inherit; color: inherit; }
       case 'open-manual':
         openSheet('manual');
         break;
+      case 'open-bg-picker':
+        openSheet('phone-bg');
+        break;
+      case 'pick-bg': {
+        const url = el.getAttribute('data-url') || '';
+        state.settings.phone_bg = url;
+        saveSettings();
+        state.phone.bg = url;
+        renderPhone();
+        closeSheet();
+        showToast('已更换手机壁纸');
+        break;
+      }
+      case 'clear-bg':
+        state.settings.phone_bg = '';
+        saveSettings();
+        state.phone.bg = '';
+        renderPhone();
+        renderSheet();
+        showToast('已恢复默认壁纸');
+        break;
+      case 'reload-bg':
+        state.avatar_config = null;
+        state.bg_options = null;
+        loadBgOptions(true);
+        break;
       case 'close-sheet':
         closeSheet();
         break;
@@ -2323,6 +3654,30 @@ button { font-family: inherit; color: inherit; }
         state.manual_tab = Number(el.getAttribute('data-index')) || 0;
         renderSheet();
         break;
+      case 'toggle-notif': {
+        if (Date.now() < swipe_suppress_until) break;
+        const row = el.closest('.cp-notif');
+        // 已经滑开的这一条: 点它本体 = 主动复位 (想复位也可以直接回划)
+        if (row && row.classList.contains('is-swiped')) {
+          closeAllSwipes();
+          break;
+        }
+        // 展开别的通知时, 把上一行滑开的收回去 (玩家自己的操作, 不是自动弹回)
+        closeOtherSwipes(row);
+        toggleNotif(el.getAttribute('data-key'));
+        break;
+      }
+      case 'del-notif': {
+        const row = el.closest('.cp-notif');
+        if (row) row.classList.add('is-deleting');
+        deletePhoneMessage(el.getAttribute('data-key'));
+        break;
+      }
+      case 'lock-notif': {
+        // 右边那颗按钮: 锁定 / 解锁 (只改键名, 不动内容)
+        togglePhoneLock(el.getAttribute('data-key'));
+        break;
+      }
       default:
         break;
     }
@@ -2350,7 +3705,9 @@ button { font-family: inherit; color: inherit; }
 
   function refreshData() {
     loadData();
-    if (panel_doc && !state.corpses.length) {
+    refreshPhoneData();
+    maybeTrimPhoneMessages();
+    if (panel_doc && !state.corpses.length && state.view === 'corpse') {
       showToast('最后两层里没有找到 [[corpse_data]] 数据');
     }
   }
@@ -2376,8 +3733,12 @@ button { font-family: inherit; color: inherit; }
     }
 
     loadData({ render: false });
+    refreshPhoneData();
     state.sheet = '';
     state.detail_part = '';
+    // 有未读手机消息时直接开在手机界面 (球上的红点就是这个意思), 否则沿用上次看的界面
+    state.view = state.phone.unread ? 'phone' : state.view || 'corpse';
+    state.phone.expanded = {};
 
     panel_el = host_doc.createElement('div');
     panel_el.className = 'cpb-panel';
@@ -2396,6 +3757,8 @@ button { font-family: inherit; color: inherit; }
 
     panel_el.appendChild(panel_iframe);
     host_doc.body.appendChild(panel_el);
+    // 立刻按窗口真实尺寸写死 px, 别等 iframe 加载 (窄屏下 CSS inset:0 会算出 0 高度)
+    fitPanelOverlay();
 
     if (!host_keydown_listener) {
       host_keydown_listener = event => {
@@ -2408,12 +3771,20 @@ button { font-family: inherit; color: inherit; }
     devLog('已打开全屏面板');
   }
 
-  function mountPanelApp() {
+  function mountPanelApp(retry) {
     panel_doc = panel_iframe ? panel_iframe.contentDocument : null;
     if (!panel_doc) {
       console.error(LOG_PREFIX, '无法访问面板 iframe 的 document');
       return;
     }
+    // iframe 文档可能还没就绪 (about:blank 阶段 body 为空), 稍等重试
+    if (!panel_doc.body) {
+      if ((retry || 0) < 8) {
+        host_win.setTimeout(() => mountPanelApp((retry || 0) + 1), 80);
+      }
+      return;
+    }
+    fitPanelOverlay();
 
     // 允许被自愈巡检重复调用: 先拆掉上一次挂上的监听/DOM
     teardownPanelApp();
@@ -2428,17 +3799,28 @@ button { font-family: inherit; color: inherit; }
 
     // 从输入框恢复上次的选择 (尽力反向解析)
     adoptFromInput();
+    // 先把手机消息读进来 (界面/红点/壁纸都靠它)
+    refreshPhoneData();
+    renderViewState();
 
     renderChars();
     renderMedia();
     renderSide();
     renderTagbar();
+    renderPhone();
     renderSheet();
     layoutFrame();
+    // 面板一开就是手机界面: 直接算已读
+    if (state.view === 'phone') markPhoneRead();
 
     panel_doc.addEventListener('click', onPanelClick);
     panel_doc.addEventListener('input', onPanelInput);
     panel_doc.addEventListener('keydown', onPanelKeydown);
+    // 通知条的左右滑动 (露出叉号 / 点叉号删除)
+    panel_doc.addEventListener('pointerdown', onPhonePointerDown);
+    panel_doc.addEventListener('pointermove', onPhonePointerMove);
+    panel_doc.addEventListener('pointerup', onPhonePointerUp);
+    panel_doc.addEventListener('pointercancel', onPhonePointerCancel);
 
     // 备用: 窗口尺寸变化时重算画面框 (ResizeObserver 不可用时也能工作)
     resize_listener = () => {
@@ -2498,11 +3880,16 @@ button { font-family: inherit; color: inherit; }
   /** 拆掉挂在面板文档上的所有东西 (自愈重挂载时先做这一步) */
   function teardownPanelApp() {
     teardownLayoutObserver();
+    swipe_state = null;
     if (!panel_doc) return;
     try {
       panel_doc.removeEventListener('click', onPanelClick);
       panel_doc.removeEventListener('input', onPanelInput);
       panel_doc.removeEventListener('keydown', onPanelKeydown);
+      panel_doc.removeEventListener('pointerdown', onPhonePointerDown);
+      panel_doc.removeEventListener('pointermove', onPhonePointerMove);
+      panel_doc.removeEventListener('pointerup', onPhonePointerUp);
+      panel_doc.removeEventListener('pointercancel', onPhonePointerCancel);
     } catch (error) {
       /* 忽略 */
     }
@@ -2529,11 +3916,16 @@ button { font-family: inherit; color: inherit; }
 
     // 先拆监听/观察器, 再摘引用
     teardownLayoutObserver();
+    swipe_state = null;
     if (panel_doc) {
       try {
         panel_doc.removeEventListener('click', onPanelClick);
         panel_doc.removeEventListener('input', onPanelInput);
         panel_doc.removeEventListener('keydown', onPanelKeydown);
+        panel_doc.removeEventListener('pointerdown', onPhonePointerDown);
+        panel_doc.removeEventListener('pointermove', onPhonePointerMove);
+        panel_doc.removeEventListener('pointerup', onPhonePointerUp);
+        panel_doc.removeEventListener('pointercancel', onPhonePointerCancel);
       } catch (error) {
         /* 忽略 */
       }
@@ -2566,10 +3958,11 @@ button { font-family: inherit; color: inherit; }
   // ============================================================================================
 
   function setBallPosition(left, top, save) {
-    const size = ballSize();
+    const width = ballWidth();
+    const height = ballSize();
     const view = viewportSize();
-    state.ball_left = clamp(left, EDGE_PADDING, view.w - size - EDGE_PADDING);
-    state.ball_top = clamp(top, EDGE_PADDING, view.h - size - EDGE_PADDING);
+    state.ball_left = clamp(left, EDGE_PADDING, view.w - width - EDGE_PADDING);
+    state.ball_top = clamp(top, EDGE_PADDING, view.h - height - EDGE_PADDING);
     if (ball_el) {
       ball_el.style.left = state.ball_left + 'px';
       ball_el.style.top = state.ball_top + 'px';
@@ -2582,10 +3975,98 @@ button { font-family: inherit; color: inherit; }
   }
 
   function viewportSize() {
-    const root = host_doc.documentElement || {};
-    const w = root.clientWidth || host_win.innerWidth || 0;
-    const h = root.clientHeight || host_win.innerHeight || 0;
-    return { w: w || 1, h: h || 1 };
+    let w = 0;
+    let h = 0;
+    try {
+      w = host_win.innerWidth || 0;
+      h = host_win.innerHeight || 0;
+      // 移动端地址栏/软键盘会把可视视口压小, 取两者较小值更贴边
+      const vv = host_win.visualViewport;
+      if (vv && vv.width && vv.height) {
+        w = Math.min(w || vv.width, vv.width);
+        h = Math.min(h || vv.height, vv.height);
+      }
+    } catch (error) {
+      /* 忽略 */
+    }
+    if (!w || !h) {
+      const root = host_doc.documentElement || {};
+      w = root.clientWidth || 0;
+      h = root.clientHeight || 0;
+    }
+    if (!w || !h) {
+      w = 360;
+      h = 640;
+    }
+    return { w: Math.max(160, Math.round(w)), h: Math.max(160, Math.round(h)) };
+  }
+
+  /**
+   * 按窗口真实尺寸把面板与 iframe 写死成 px。
+   *
+   * 为什么不能靠 CSS 的 inset:0 / height:100%:
+   *   酒馆自己的样式里有 `html { -webkit-transform: translateZ(0) }`,
+   *   这会让所有 position:fixed 元素的包含块变成 html 的 padding box (而不是视口);
+   *   而窄屏(≤1000px)下酒馆又给 body 加上 `position: fixed`, body 脱离文档流后
+   *   html 的盒子高度塌成 0 —— 于是 inset:0 的面板算出 0 高度, 点开什么都看不见,
+   *   拉宽窗口后 body 回到文档流、html 撑满, 界面才「突然出现」。
+   * 这里改成按 innerWidth/innerHeight 写死 px, 再用实测矩形校正偏移, 彻底绕开这个坑。
+   */
+  function fitPanelOverlay() {
+    if (!panel_el) return;
+    const view = viewportSize();
+    const stamp = view.w + 'x' + view.h;
+
+    if (panel_el.getAttribute('data-cp-size') !== stamp) {
+      panel_el.setAttribute('data-cp-size', stamp);
+      // 尺寸变化: 先回到 (0,0), 再重新做一次偏移校正
+      panel_el.setAttribute('data-cp-offset', '0');
+      applyImportant(panel_el, {
+        position: 'fixed',
+        left: '0',
+        top: '0',
+        right: 'auto',
+        bottom: 'auto',
+        width: view.w + 'px',
+        height: view.h + 'px',
+      });
+      if (panel_iframe) {
+        applyImportant(panel_iframe, {
+          position: 'absolute',
+          left: '0',
+          top: '0',
+          width: view.w + 'px',
+          height: view.h + 'px',
+        });
+      }
+    }
+
+    // html 被 transform 时固定定位原点可能偏移: 同一尺寸只校正一次, 避免反复叠加
+    if (panel_el.getAttribute('data-cp-offset') !== '1') {
+      panel_el.setAttribute('data-cp-offset', '1');
+      try {
+        const rect = panel_el.getBoundingClientRect();
+        const dx = Math.round(rect.left);
+        const dy = Math.round(rect.top);
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+          applyImportant(panel_el, { left: -dx + 'px', top: -dy + 'px' });
+        }
+      } catch (error) {
+        /* 忽略 */
+      }
+    }
+  }
+
+  /** 一次性写多个 !important 内联样式 */
+  function applyImportant(node, styles) {
+    if (!node || !node.style) return;
+    Object.keys(styles).forEach(name => {
+      try {
+        node.style.setProperty(name, styles[name], 'important');
+      } catch (error) {
+        /* 忽略 */
+      }
+    });
   }
 
   /**
@@ -2637,6 +4118,8 @@ button { font-family: inherit; color: inherit; }
             body.appendChild(panel_el);
             devLog('面板被宿主摘下, 已重新挂回 body');
           }
+          // 每次巡检都重新对齐尺寸: 窄屏/地址栏变化会让旧尺寸失效
+          fitPanelOverlay();
           const doc = panel_iframe ? panel_iframe.contentDocument : null;
           if (panel_iframe && !doc) {
             // iframe 彻底坏了: 重建整个面板 iframe
@@ -2676,6 +4159,10 @@ button { font-family: inherit; color: inherit; }
     }
     panel_doc = null;
     panel_refs = null;
+    // 换了新 iframe: 清掉尺寸标记, 让 fitPanelOverlay 重新写一遍 px
+    panel_el.removeAttribute('data-cp-size');
+    panel_el.removeAttribute('data-cp-offset');
+    fitPanelOverlay();
   }
 
   /** 任何交互都顺手巡检一次 (防抖), 保证"点一下就能恢复" */
@@ -2781,7 +4268,8 @@ button { font-family: inherit; color: inherit; }
     '<path d="M8 10.5h5M10.5 8v5" opacity=".65"></path></svg>';
 
   function createBall() {
-    const size = ballSize();
+    const width = ballWidth();
+    const height = ballSize();
     ball_el = host_doc.createElement('div');
     ball_el.className = 'cpb-ball';
     ball_el.setAttribute(MARK, 'ball');
@@ -2789,14 +4277,14 @@ button { font-family: inherit; color: inherit; }
     ball_el.setAttribute('role', 'button');
     ball_el.setAttribute('aria-label', '尸检面板');
     ball_el.title = '点击打开尸检全屏面板 (可拖动)';
-    ball_el.style.width = size + 'px';
-    ball_el.style.height = size + 'px';
+    ball_el.style.width = width + 'px';
+    ball_el.style.height = height + 'px';
     ball_el.innerHTML = BALL_ICON;
     host_doc.body.appendChild(ball_el);
 
     const view = viewportSize();
-    const fallback_left = view.w - size - 20;
-    const fallback_top = view.h - size - 150;
+    const fallback_left = view.w - width - 16;
+    const fallback_top = view.h - height - 150;
     setBallPosition(
       state.settings.ball_x === null ? fallback_left : state.settings.ball_x,
       state.settings.ball_y === null ? fallback_top : state.settings.ball_y,
@@ -2808,6 +4296,7 @@ button { font-family: inherit; color: inherit; }
     ball_el.addEventListener('pointerup', onPointerUp);
     ball_el.addEventListener('pointercancel', onPointerCancel);
     ball_el.addEventListener('contextmenu', event => event.preventDefault());
+    updateBallState();
   }
 
   function toggleBall() {
@@ -2817,7 +4306,9 @@ button { font-family: inherit; color: inherit; }
   }
 
   function onHostResize() {
-    // 窗口缩放: 重新夹取球的位置, 顺便确认自身与面板都还在页面上
+    // 窗口缩放: 重新夹取球的位置, 面板重新铺满, 再确认自身与面板都还活着
+    if (panel_el) panel_el.setAttribute('data-cp-offset', '0');
+    fitPanelOverlay();
     setBallPosition(state.ball_left, state.ball_top, false);
     ensureHosted();
     if (panel_doc) layoutFrame();
@@ -2843,6 +4334,8 @@ button { font-family: inherit; color: inherit; }
       refresh_timer = setTimeout(() => {
         refresh_timer = null;
         loadData();
+        refreshPhoneData();
+        maybeTrimPhoneMessages();
       }, 700);
     };
     const listen = name => {
@@ -2854,6 +4347,24 @@ button { font-family: inherit; color: inherit; }
     };
     ['CHAT_CHANGED', 'MESSAGE_RECEIVED', 'MESSAGE_EDITED', 'MESSAGE_UPDATED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED',
       'CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED', 'GENERATION_ENDED'].forEach(listen);
+
+    registerMvuEvents();
+  }
+
+  /** MVU 变量更新完毕: 手机消息/坐标可能变了, 立刻刷新 (红点也在这里亮起) */
+  function registerMvuEvents() {
+    if (mvu_listener_done) return;
+    try {
+      if (typeof Mvu === 'undefined' || !Mvu || !Mvu.events) return;
+      if (typeof Mvu.events.VARIABLE_UPDATE_ENDED !== 'string' || typeof eventOn !== 'function') return;
+      eventOn(Mvu.events.VARIABLE_UPDATE_ENDED, () => {
+        refreshPhoneData();
+        maybeTrimPhoneMessages();
+      });
+      mvu_listener_done = true;
+    } catch (error) {
+      console.warn(LOG_PREFIX, '监听 MVU 变量更新事件失败 (手机消息不会即时刷新)', error);
+    }
   }
 
   function registerButtons() {
@@ -2893,6 +4404,8 @@ button { font-family: inherit; color: inherit; }
   function destroy() {
     releaseDrag();
     stopWatchdog();
+    hideNotice(true);
+    notice_queue = [];
     if (host_keydown_listener) {
       host_doc.removeEventListener('keydown', host_keydown_listener);
       host_keydown_listener = null;
@@ -2986,13 +4499,46 @@ button { font-family: inherit; color: inherit; }
 
     // 先预热一次数据, 打开面板时就不用等
     loadData({ render: false });
+    refreshPhoneData();
+    ensurePhoneSeenInit(); // 首次运行: 现有消息直接算已读, 不亮红点
+    maybeTrimPhoneMessages();
 
     // 定期巡检: 宿主要么缩放窗口、要么重建 iframe, 我们总能长回来
     startWatchdog();
 
     window.addEventListener('pagehide', onPageHide);
 
+    // MVU 是异步初始化的: 等它就绪后再读一遍手机消息 (读不到就退回 getVariables)
+    waitMvuThenRefresh();
+
     devLog('脚本已加载: 点右下角悬浮球或脚本按钮「' + OPEN_PANEL_BUTTON + '」打开尸检面板');
+  }
+
+  /**
+   * 等 MVU 变量框架初始化完成, 然后刷新手机消息。
+   * (MVU 通常是异步加载的, 脚本初始化时它可能还不存在; 读不到就退回 getVariables)
+   */
+  async function waitMvuThenRefresh() {
+    let ready = false;
+    try {
+      ready = typeof Mvu !== 'undefined' && Boolean(Mvu);
+    } catch (error) {
+      ready = false; // Mvu 还在 TDZ 里
+    }
+    if (!ready) {
+      try {
+        if (typeof waitGlobalInitialized === 'function') {
+          await waitGlobalInitialized('Mvu');
+          devLog('MVU 已就绪');
+        }
+      } catch (error) {
+        console.warn(LOG_PREFIX, '等待 MVU 初始化失败 (手机消息改从 getVariables 读)', error);
+      }
+    }
+    registerMvuEvents();
+    refreshPhoneData();
+    ensurePhoneSeenInit();
+    maybeTrimPhoneMessages();
   }
 
   // 控制台调试接口
@@ -3002,6 +4548,49 @@ button { font-family: inherit; color: inherit; }
         open: openPanel,
         close: closePanel,
         refresh: refreshData,
+        /** 切界面: 'corpse' | 'phone' */
+        view: setView,
+        /** 手机消息: 当前快照 */
+        phone: () => ({
+          clock: state.phone.clock,
+          date: state.phone.date,
+          where: state.phone.where,
+          unread: state.phone.unread,
+          bg: state.phone.bg,
+          messages: state.phone.messages.map(msg => ({
+            key: msg.key,
+            locked: msg.locked,
+            type: msg.type,
+            title: msg.title,
+            time: msg.time,
+          })),
+        }),
+        /** 手机消息: 挂了的已读签名数 / 是否已初始化 */
+        seenInfo: () => ({ count: state.seen.length, init: state.seen_init }),
+        /** 手动清一条手机消息 (会写回最新楼层变量) */
+        deletePhoneMessage,
+        /** 锁定 / 解锁一条手机消息 (只改变量键名, 写回最新楼层) */
+        togglePhoneLock,
+        /** 手动触发一次"楼层 id 是 12 的倍数就清理"的检查 */
+        trimNow: maybeTrimPhoneMessages,
+        diag: () => {
+          const view = viewportSize();
+          const rect = panel_el ? panel_el.getBoundingClientRect() : null;
+          return {
+            viewport: view,
+            panel_present: Boolean(panel_el),
+            panel_connected: Boolean(panel_el && panel_el.isConnected),
+            panel_rect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null,
+            panel_css_size: panel_el ? panel_el.getAttribute('data-cp-size') : null,
+            iframe_doc: Boolean(panel_doc),
+            has_app: Boolean(panel_doc && panel_doc.querySelector('.cp-app')),
+            ball_present: Boolean(ball_el),
+            ball_class: ball_el ? ball_el.className : null,
+            view: state.view,
+            phone_unread: state.phone.unread,
+            last_floor: latestFloorId(),
+          };
+        },
         state: () => ({
           floors: state.floor_ids.slice(),
           active_id: state.active_id,
